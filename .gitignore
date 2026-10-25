@@ -1,0 +1,5 @@
+# Runtime and build artifacts
+.env
+__pycache__/
+*.py[cod]
+/build/battlefront.lua
