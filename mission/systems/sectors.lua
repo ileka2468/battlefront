@@ -100,3 +100,183 @@ function BF.RenderSectorMarkers(secName)
     end)
 end
 
+-- ------------------------------------------------------------------------------
+-- 6. COMBAT ALERTS & CLEARANCE DEPOSIT
+-- ------------------------------------------------------------------------------
+function BF.OnSectorUnderAttack(secName)
+    local sec = BF.State.sectors[secName]
+    if not sec then return end
+
+    local now = timer.getTime()
+    sec.lastAttackTime = now
+
+    if not sec.underAttack then
+        sec.underAttack = true
+        local defSide = sec.side
+        local defName = (defSide == SIDE_BLUE) and "ALLIED" or "RED COMMAND"
+
+        local alertMsg = string.format("⚠ TACTICAL ALERT: %s [%s] is UNDER ATTACK! Ground defenses engaged! CAS / CAP scramble requested!",
+            secName, defName)
+        BF.Broadcast(alertMsg, defSide, 14)
+
+        BF.RenderSectorMarkers(secName)
+    end
+end
+
+function BF.CheckSectorDefensesCleared(secName, atkSide)
+    local sec = BF.State.sectors[secName]
+    if not sec or sec.status == "NEUTRAL" or sec.status == "CLEARED" then return end
+
+    -- Check if all defenders are dead
+    local aliveCount = 0
+    for uname, _ in pairs(sec.defenders) do
+        local u = Unit.getByName(uname)
+        if u and u:isExist() and u:getLife() > 1 then
+            aliveCount = aliveCount + 1
+        end
+    end
+
+    if aliveCount == 0 then
+        -- DEFENSES CLEARED! IMMEDIATE TREASURY DEPOSIT
+        sec.status = "NEUTRAL"
+        sec.clearedSide = atkSide
+        sec.underAttack = false
+        sec.lastTripwireAlertTime = 0
+
+        local coal = BF.State.coalitions[atkSide]
+        if coal then
+            coal.treasury = coal.treasury + sec.captureBounty
+            local depositMsg = string.format("★ STRATEGIC SUCCESS (%s): %s defenses NEUTRALIZED!\nTreasury Bounty: +%s (Balance: %s)!\nSector is OPEN! Deliver garrison troops or logistics cargo to LZ to FORTIFY!",
+                coal.name, secName, BF.FormatMoney(sec.captureBounty), BF.FormatMoney(coal.treasury))
+            BF.Broadcast(depositMsg, atkSide, 16)
+        end
+
+        local defSide = sec.side
+        local loseMsg = string.format("CRITICAL ALERT (%s): %s point defenses have FALLEN!\nSector is vulnerable! Rush counter-logistics or assault troops to LZ to RE-GARRISON and save the base!",
+            (defSide == SIDE_BLUE) and "BLUFOR" or "REDFOR", secName)
+        BF.Broadcast(loseMsg, defSide, 16)
+
+        BF.RenderSectorMarkers(secName)
+        BF.SaveState()
+    end
+end
+
+-- ------------------------------------------------------------------------------
+-- 7. THE PHYSICAL LOGISTICS CAPTURE & EARLY-WARNING TRIPWIRE ENGINE
+-- ------------------------------------------------------------------------------
+function BF.ProcessSectorsAndLogistics()
+    local now = timer.getTime()
+
+    for secName, sec in pairs(BF.State.sectors) do
+        -- Check Alert Timeout
+        if sec.underAttack and (now - sec.lastAttackTime > BF.Config.combatAlertTimeout) then
+            sec.underAttack = false
+            BF.RenderSectorMarkers(secName)
+        end
+
+        -- Process Neutral Sectors (The Logistics Race)
+        if sec.status == "NEUTRAL" then
+            local atkSide = sec.clearedSide
+            local defSide = (atkSide == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
+
+            local hostileInBubble = false
+            local friendlyInBubble = false
+            local CAPTURE_LZ_RADIUS = 3000 -- 3 km delivery / touchdown radius
+            local TRIPWIRE_RADIUS = BF.Config.holdRadius or 18000
+
+            -- Check all players for physical touchdown or tripwire breach
+            for _, side in ipairs({SIDE_BLUE, SIDE_RED}) do
+                local players = coalition.getPlayers(side) or {}
+                for _, u in ipairs(players) do
+                    if u and u:isExist() then
+                        local pos = u:getPoint()
+                        local dist = math.sqrt((pos.x - sec.pos.x)^2 + (pos.z - sec.pos.z)^2)
+
+                        if dist <= TRIPWIRE_RADIUS then
+                            if side == defSide and u:inAir() then
+                                hostileInBubble = true
+                            elseif side == atkSide then
+                                friendlyInBubble = true
+                            end
+                        end
+
+                        -- Physical Touchdown at Objective LZ (within 3 km)
+                        if dist <= CAPTURE_LZ_RADIUS then
+                            local altAGL = pos.y - land.getHeight({x = pos.x, y = pos.z})
+                            local vel = u:getVelocity()
+                            local speed = math.sqrt(vel.x^2 + vel.y^2 + vel.z^2)
+
+                            -- Landed or low-speed tactical touchdown
+                            if (not u:inAir()) or (altAGL < 25 and speed < 35) then
+                                if side == atkSide then
+                                    -- ATTACKER CAPTURE & FORTIFICATION!
+                                    sec.status = "DEFENDED"
+                                    sec.side = atkSide
+                                    sec.underAttack = false
+
+                                    local teamName = (atkSide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
+                                    local fortMsg = string.format("🛡 SECTOR CAPTURED & FORTIFIED (%s): %s has been secured by %s!\nFresh SHORAD, AAA & MANPADS garrison deployed to LZ! Production fully online!",
+                                        teamName, secName, u:getPlayerName() or "Tactical Logistics")
+                                    BF.Broadcast(fortMsg, nil, 16)
+
+                                    BF.SpawnSectorPointDefense(secName, atkSide)
+                                    BF.RenderSectorMarkers(secName)
+                                    BF.SaveState()
+                                    break
+                                elseif side == defSide then
+                                    -- DEFENDER SAVES THE BASE!
+                                    sec.status = "DEFENDED"
+                                    sec.side = defSide
+                                    sec.underAttack = false
+
+                                    local teamName = (defSide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
+                                    local saveMsg = string.format("★ BASE SAVED (%s): %s counter-logistics touched down at %s!\nGarrison re-established! Enemy capture thwarted!",
+                                        teamName, u:getPlayerName() or "Counter-Logistics", secName)
+                                    BF.Broadcast(saveMsg, nil, 16)
+
+                                    BF.SpawnSectorPointDefense(secName, defSide)
+                                    BF.RenderSectorMarkers(secName)
+                                    BF.SaveState()
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Broadcast Tripwire Alert if hostiles enter contested sector
+            if hostileInBubble and friendlyInBubble then
+                if (now - (sec.lastTripwireAlertTime or 0)) > 45 then
+                    sec.lastTripwireAlertTime = now
+                    local alertMsg = string.format("⚠ TRIPWIRE ALERT: Hostile fighters entered %s airspace! Inbound logistics mask in terrain! Friendly CAP vector to intercept!", secName)
+                    BF.Broadcast(alertMsg, atkSide, 10)
+                end
+            end
+        end
+    end
+
+    -- Process Hero Slot Cooldowns
+    for side, coal in pairs(BF.State.coalitions) do
+        for slotUnitName, cooldown in pairs(coal.heroCooldowns) do
+            if cooldown > 0 then
+                coal.heroCooldowns[slotUnitName] = math.max(0, cooldown - 5)
+                if coal.heroCooldowns[slotUnitName] == 0 then
+                    trigger.action.setUserFlag(slotUnitName, 0)
+                    BF.Broadcast(string.format("COMMAND (%s): Replacement airframe (%s) delivered to flight line. Ready for sortie!", coal.name, slotUnitName), side, 10)
+                end
+            end
+        end
+    end
+
+    return now + 5 -- re-check every 5 seconds
+end
+
+-- ------------------------------------------------------------------------------
+-- 7B. HIGH-PERFORMANCE SERVER CULLING ENGINE (AI SLEEP / WAKE)
+-- ------------------------------------------------------------------------------
+
+
+BF.Sectors.RenderSectorMarkers = BF.RenderSectorMarkers
+BF.Sectors.DrawFrontlineAndQuadrants = BF.DrawFrontlineAndQuadrants
+BF.Sectors.ProcessLoop = BF.ProcessSectorsAndLogistics
