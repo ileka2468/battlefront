@@ -130,3 +130,205 @@ function BF.EWR.IsTargetDetected(targetUnit, friendlyRadars)
     return false
 end
 
+-- Format target altitude with thousands comma separator
+local function formatAltitude(altMeters)
+    local altFt = math.floor(altMeters * 3.28084 + 0.5)
+    if altFt >= 1000 then
+        return string.format("%d,%03d ft", math.floor(altFt / 1000), math.floor(altFt % 1000))
+    else
+        return string.format("%d ft", altFt)
+    end
+end
+
+-- Calculate target aspect relative to line-of-sight to player
+local function calculateAspect(brg, targetHdg)
+    local losToPlayer = (brg + 180) % 360
+    local diff = (losToPlayer - targetHdg) % 360
+    if diff > 180 then diff = diff - 360 end
+
+    if math.abs(diff) <= 35 then
+        return "Hot"
+    elseif math.abs(diff) >= 145 then
+        return "Cold"
+    elseif diff > 0 then
+        return (diff >= 75 and diff <= 105) and "Beam Right" or "Flank Right"
+    else
+        return (diff <= -75 and diff >= -105) and "Beam Left" or "Flank Left"
+    end
+end
+
+-- Clean target type name for neat table formatting
+local function cleanTypeName(rawType)
+    if not rawType then return "Bandit" end
+    if rawType == "F-117-NightHawk" then return "F-117A" end
+    if rawType == "FA-18C_hornet" then return "FA-18C_hornet" end
+    if rawType == "A-10C_2" then return "A-10C" end
+    if rawType == "F-16C_50" then return "F-16C" end
+    if rawType == "Su-25T" then return "Su-25T" end
+    if rawType == "Ka-50_3" then return "Ka-50" end
+    if rawType == "Mi-24P" then return "Mi-24P" end
+    if rawType == "AH-64D_BLK_II" then return "AH-64D" end
+    if rawType:len() > 14 then
+        return rawType:sub(1, 14)
+    end
+    return rawType
+end
+
+-- Generate and send the Contention EWR Picture Report to all players of a coalition
+function BF.EWR.SendPictureReportForSide(side)
+    local friendlyRadars, groundCount, awacsCount = BF.EWR.GetActiveRadars(side)
+    local enemySide = (side == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
+    local myPlayers = coalition.getPlayers(side) or {}
+
+    if #myPlayers == 0 then return end
+
+    -- Scan all enemy airborne units
+    local detectedEnemies = {}
+    local seenUnits = {}
+    local enemyPlayers = coalition.getPlayers(enemySide) or {}
+
+    for _, enemyUnit in ipairs(enemyPlayers) do
+        if enemyUnit and enemyUnit:isExist() and not seenUnits[enemyUnit:getName()] then
+            seenUnits[enemyUnit:getName()] = true
+            if BF.EWR.IsTargetDetected(enemyUnit, friendlyRadars) then
+                table.insert(detectedEnemies, enemyUnit)
+            end
+        end
+    end
+
+    -- Also check AI flights if any exist on enemy side
+    local enemyGroups = coalition.getGroups(enemySide, Group.Category.AIRPLANE) or {}
+    for _, grp in ipairs(enemyGroups) do
+        for _, u in ipairs(grp:getUnits()) do
+            if u and u:isExist() and not seenUnits[u:getName()] then
+                seenUnits[u:getName()] = true
+                if BF.EWR.IsTargetDetected(u, friendlyRadars) then
+                    table.insert(detectedEnemies, u)
+                end
+            end
+        end
+    end
+
+    -- For each human player in our coalition, build customized report relative to their aircraft
+    for _, playerUnit in ipairs(myPlayers) do
+        if playerUnit and playerUnit:isExist() then
+            local ppos = nil
+            pcall(function() ppos = playerUnit:getPoint() end)
+
+            if ppos then
+                local contacts = {}
+
+                for _, bogey in ipairs(detectedEnemies) do
+                    if bogey and bogey:isExist() then
+                        local bpos = nil
+                        local vel = nil
+                        pcall(function()
+                            bpos = bogey:getPoint()
+                            vel = bogey:getVelocity()
+                        end)
+
+                        if bpos and vel then
+                            local spdKts = math.floor(math.sqrt(vel.x^2 + vel.z^2) * 1.94384 + 0.5)
+
+                            -- Filter out ground/taxiing vehicles (MTI Doppler radar filter)
+                            if spdKts >= 30 or bpos.y > 100 then
+                                local dx = bpos.x - ppos.x
+                                local dz = bpos.z - ppos.z
+                                local distM = math.sqrt(dx^2 + dz^2)
+                                local distNM = distM * 0.000539957
+
+                                -- Bearing from player to bogey
+                                local brg = math.deg(math.atan2(dz, dx))
+                                if brg < 0 then brg = brg + 360 end
+                                brg = math.floor(brg + 0.5)
+                                if brg == 0 then brg = 360 end
+
+                                -- Bogey Heading
+                                local hdg = math.deg(math.atan2(vel.z, vel.x))
+                                if hdg < 0 then hdg = hdg + 360 end
+                                hdg = math.floor(hdg + 0.5)
+                                if hdg == 0 then hdg = 360 end
+
+                                local aspect = calculateAspect(brg, hdg)
+                                local altStr = formatAltitude(bpos.y)
+                                local rawType = bogey:getTypeName()
+                                local typeStr = cleanTypeName(rawType)
+
+                                table.insert(contacts, {
+                                    type = typeStr,
+                                    brg = brg,
+                                    rng = distNM,
+                                    alt = altStr,
+                                    spd = spdKts,
+                                    hdg = hdg,
+                                    aspect = aspect,
+                                })
+                            end
+                        end
+                    end
+                end
+
+                -- Sort by closest range first
+                table.sort(contacts, function(a, b) return a.rng < b.rng end)
+
+                -- Build the Battlefront EWR table
+                local lines = {}
+                table.insert(lines, "Battlefront EWR | Picture Report\n")
+
+                if #friendlyRadars == 0 then
+                    table.insert(lines, "⚠ RADAR NETWORK OFFLINE: All friendly EWR radar stations & AWACS destroyed! Deploy mobile EWR via map mark: -drop ewr")
+                elseif #contacts == 0 then
+                    table.insert(lines, string.format("[Network: %d Ground Radars | %d AWACS Online]\nPicture Clean. No hostile airborne contacts detected.", groundCount, awacsCount))
+                else
+                    table.insert(lines, string.format("%-14s %-3s   %-8s  %-9s  %-9s   %-3s   %s", "TYPE", "BRG", "RNG", "ALT", "SPD", "HDG", "Aspect"))
+                    -- Limit to closest 7 contacts to avoid VR / HUD clutter
+                    local maxShow = math.min(#contacts, 7)
+                    for i = 1, maxShow do
+                        local c = contacts[i]
+                        table.insert(lines, string.format("%-14s %03d   %5.1f NM  %9s  %4d Knts   %03d   %s",
+                            c.type, c.brg, c.rng, c.alt, c.spd, c.hdg, c.aspect))
+                    end
+                    if #contacts > 7 then
+                        table.insert(lines, string.format("\n... and %d additional distant contacts tracked.", #contacts - 7))
+                    end
+                end
+
+                local reportText = table.concat(lines, "\n")
+                local grp = nil
+                pcall(function() grp = playerUnit:getGroup() end)
+                if grp and grp.getID then
+                    trigger.action.outTextForGroup(grp:getID(), reportText, 18, true)
+                else
+                    trigger.action.outTextForCoalition(side, reportText, 18, true)
+                end
+            end
+        end
+    end
+end
+
+-- 20-Second Automatic Picture Report Loop
+function BF.EWR.Loop()
+    local bRadars, bG, bA = BF.EWR.GetActiveRadars(SIDE_BLUE)
+    local rRadars, rG, rA = BF.EWR.GetActiveRadars(SIDE_RED)
+
+    BF.EWR.tickCount = (BF.EWR.tickCount or 0) + 1
+    if BF.EWR.tickCount % 3 == 1 then
+        log(string.format("BATTLEFRONT EWR TICK #%d: BLUFOR Radars [%d ground, %d AWACS] | REDFOR Radars [%d ground, %d AWACS]",
+            BF.EWR.tickCount, bG, bA, rG, rA))
+    end
+
+    for _, side in ipairs({SIDE_BLUE, SIDE_RED}) do
+        if not BF.State.coalitionEwrDisabled[side] then
+            pcall(function()
+                BF.EWR.SendPictureReportForSide(side)
+            end)
+        end
+    end
+
+    return timer.getTime() + BF.EWR.interval -- Refresh every 20 seconds
+end
+
+-- ------------------------------------------------------------------------------
+-- 10. INITIALIZATION
+-- ------------------------------------------------------------------------------
+
