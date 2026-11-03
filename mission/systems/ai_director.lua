@@ -568,3 +568,605 @@ function Director.EvaluateResearch(side, now)
     return false, "complete"
 end
 
+-- ------------------------------------------------------------------------------
+-- 4. TARGET SECTOR SELECTION (Distributed Multi-Front Doctrine)
+-- ------------------------------------------------------------------------------
+function Director.SelectTargetSector(role, side, preferredQuadrant)
+    if not BF.State or not BF.State.sectors then return nil end
+
+    local enemySide = (side == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
+    local targetQuad = preferredQuadrant
+
+    -- Translate theater front to opposing enemy quadrant for offensive missions
+    if role == "STRIKE" or role == "SEAD" then
+        if preferredQuadrant == "NE" or preferredQuadrant == "SE" then
+            targetQuad = (side == SIDE_BLUE) and "NE" or "SE"
+        elseif preferredQuadrant == "NW" or preferredQuadrant == "SW" then
+            targetQuad = (side == SIDE_BLUE) and "NW" or "SW"
+        end
+    end
+
+    local candidates = {}
+
+    for sName, sec in pairs(BF.State.sectors) do
+        if not targetQuad or sec.quadrant == targetQuad then
+            local score = 0
+            if role == "LOGISTICS" then
+                if sec.side == enemySide and sec.status == "HOLDING" then
+                    score = 120
+                elseif sec.side == side and (sec.underAttack or sec.status == "DEFENDED") then
+                    score = 60
+                end
+            elseif role == "STRIKE" or role == "SEAD" then
+                if sec.side == enemySide then
+                    score = (sec.income or 2) * 10
+                    if sName:find("Refinery") or sName:find("Fuel") then score = score + 40 end
+                    if sName:find("Aerospace") or sName:find("Silicon") then score = score + 35 end
+                    if sName:find("Munitions") or sName:find("Stronghold") then score = score + 30 end
+                    if sec.underAttack then score = score + 25 end
+                    table.insert(candidates, { name = sName, sec = sec, score = score })
+                end
+            else -- CAP / ESCORT
+                score = 20
+                if sec.underAttack then score = score + 100 end
+                if sec.side == enemySide then score = score + 25 end
+                table.insert(candidates, { name = sName, sec = sec, score = score })
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b) return a.score > b.score end)
+    if candidates[1] then
+        return candidates[1].sec
+    end
+
+    -- If no sector found in preferred quadrant, fallback to any valid enemy sector
+    if targetQuad then
+        return Director.SelectTargetSector(role, side, nil)
+    end
+    return nil
+end
+
+-- ------------------------------------------------------------------------------
+-- 5. FLIGHT SPAWNING & WAYPOINT GENERATION
+-- ------------------------------------------------------------------------------
+function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
+    local tmpl = Director.ResolveTemplate(side, role)
+    if tmpl and not BF.Research.CanFieldAirframe(side, tmpl.type) then
+        log("AI DIRECTOR: blocked unpurchased or unregistered airframe " .. tostring(tmpl.type))
+        return false
+    end
+    if not tmpl then return end
+
+    Director.groupCounter = Director.groupCounter + 1
+    local grpId = Director.groupCounter
+    local grpName = string.format("%s_%d", tmpl.name, grpId)
+
+    local targetQuadrant = forceQuadrant or (targetSec and targetSec.quadrant) or (side == SIDE_BLUE and "SW" or "NE")
+    local origin = Director.GetStaging(side, targetQuadrant)
+
+    local cat = tmpl.category or Group.Category.AIRPLANE
+    local countryId = (side == SIDE_BLUE) and COUNTRY_BLUE or COUNTRY_RED
+    local sideName = (side == SIDE_BLUE) and "BLUFOR" or "REDFOR"
+
+    local targetPos = (targetSec and targetSec.pos) or { x = origin.x + 40000, z = origin.z + 40000 }
+    if assignedRole == "CAP" then
+        local pQuad = (targetQuadrant == "CENTER") and "CENTER" or ((targetQuadrant == "NE" or targetQuadrant == "SE") and "NE" or "NW")
+        if Director.QUADRANT_PATROLS[pQuad] and Director.QUADRANT_PATROLS[pQuad][side] then
+            local pt = Director.QUADRANT_PATROLS[pQuad][side]
+            targetPos = { x = pt.x, z = pt.z }
+        end
+    end
+
+    local assignedRole = role or tmpl.role
+    local isHelo = (cat == Group.Category.HELICOPTER)
+    local isStrike = (assignedRole == "STRIKE" or assignedRole == "CAS")
+
+    -- Anti-Conga-Line Tactical Lateral Dispersion:
+    -- Spreads out flights across parallel combat lanes instead of flying in a single file line.
+    local lateralSpread = ((grpId % 3) - 1) * 14000
+    if assignedRole == "CAP" and capSlot then
+        lateralSpread = (capSlot - 2) * 18000 -- Slot 1: -18km, Slot 2: 0, Slot 3: +18km
+    end
+
+    -- Tactical Flight Profiles:
+    -- CAP: FL250 (7,500m) for maximum BVR missile kinematic envelope and radar line of sight.
+    -- STRIKE / CAS: Low-level terrain-masking ingress (450m AGL / ~1,400 ft) to hide in pulse-Doppler ground clutter and avoid BVR radar locks!
+    -- ESCORT: FL180 (5,500m) forward fighter sweep to sanitize the corridor.
+    -- SEAD: FL150 (4,500m) optimal high-speed launch basket for AGM-88 HARM and Kh-58.
+    -- HELO: 150m AGL for nap-of-the-earth transport.
+    local alt = 7500
+    local speed = 260
+    if isHelo then
+        alt = 150
+        speed = Director.config.heloIngressSpeed or 65
+    elseif isStrike then
+        alt = 450 -- Low-level terrain masking ingress
+        speed = 210
+    elseif assignedRole == "SEAD" then
+        alt = 4500
+        speed = 240
+    elseif assignedRole == "ESCORT" then
+        alt = 5500
+        speed = 250
+    end
+
+    -- Operational task doctrine
+    local grpTaskStr = "CAP"
+    if isHelo and assignedRole == "LOGISTICS" then
+        grpTaskStr = "Transport"
+    elseif assignedRole == "SEAD" then
+        grpTaskStr = "SEAD"
+    elseif isStrike then
+        grpTaskStr = "Ground Attack"
+    end
+
+    -- Multi-Waypoint Tactical Route Building:
+    local routePoints = {}
+    local startX = origin.x + (isStrike and 0 or lateralSpread)
+    local startZ = origin.z
+
+    if isStrike then
+        -- 4-Waypoint Tactical Ingress Route:
+        -- WP1: Staging Base
+        -- WP2: Ingress Initial Point (IP) with tactical flank offset (hugs coastline or valley)
+        -- WP3: Target Area (pop-up attack on SAMs / ground targets)
+        -- WP4: Safe Egress turn back to friendly lines
+        local midX = (origin.x + targetPos.x) / 2
+        local midZ = (origin.z + targetPos.z) / 2
+        local flankSign = (side == SIDE_BLUE) and -1 or 1
+        local ipX = midX + (flankSign * 16000)
+        local ipZ = midZ
+
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
+        })
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = ipX, ["y"] = ipZ
+        })
+
+        local wpTargetTasks = {
+            {
+                ["id"] = "EngageTargetsInZone",
+                ["enabled"] = true,
+                ["auto"] = false,
+                ["params"] = {
+                    ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
+                    ["zoneRadius"] = 25000,
+                    ["targetTypes"] = { "Air Defence", "Ground Units" },
+                    ["priority"] = 0
+                }
+            }
+        }
+        local atkType = (tmpl.type == "F-117-NightHawk") and "Level" or "Dive"
+        table.insert(wpTargetTasks, {
+            ["id"] = "Bombing",
+            ["enabled"] = true,
+            ["auto"] = false,
+            ["params"] = {
+                ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
+                ["expend"] = "All",
+                ["attackType"] = atkType,
+                ["altitude"] = 750,
+                ["altitudeEdited"] = true
+            }
+        })
+        table.insert(routePoints, {
+            ["alt"] = 750, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed + 20, ["x"] = targetPos.x, ["y"] = targetPos.z,
+            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = wpTargetTasks } }
+        })
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = ipX, ["y"] = ipZ,
+            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = {
+                {
+                    ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
+                    ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
+                }
+            } } }
+        })
+
+    elseif assignedRole == "CAP" then
+        -- 3-Waypoint CAP Station Racetrack Orbit:
+        -- WP1: Staging Base with lateral spread
+        -- WP2: Patrol Anchor Alpha (Entry point)
+        -- WP3: Patrol Anchor Bravo (22km offset along front) with Race-Track Orbit!
+        local capEntryX = targetPos.x + lateralSpread
+        local capEntryZ = targetPos.z
+        local capOrbitX = targetPos.x + lateralSpread + 22000
+        local capOrbitZ = targetPos.z + 8000
+
+        local wpCapTasks = {
+            {
+                ["id"] = "Orbit",
+                ["enabled"] = true,
+                ["auto"] = false,
+                ["params"] = {
+                    ["pattern"] = "Race-Track",
+                    ["speed"] = speed,
+                    ["altitude"] = alt
+                }
+            },
+            {
+                ["id"] = "EngageTargets",
+                ["enabled"] = true,
+                ["auto"] = false,
+                ["params"] = {
+                    ["targetTypes"] = { "Planes" },
+                    ["maxDist"] = 75000, -- Constrained to defensive quadrant bubble (75 km / ~40 NM)
+                    ["priority"] = 0
+                }
+            }
+        }
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
+        })
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = capEntryX, ["y"] = capEntryZ
+        })
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = capOrbitX, ["y"] = capOrbitZ,
+            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = wpCapTasks } }
+        })
+
+    else
+        -- Escort, SEAD, Logistics:
+        local engTasks = {}
+        if assignedRole == "ESCORT" then
+            table.insert(engTasks, {
+                ["id"] = "EngageTargets", ["enabled"] = true, ["auto"] = false,
+                ["params"] = { ["targetTypes"] = { "Planes" }, ["maxDist"] = 75000, ["priority"] = 0 }
+            })
+            table.insert(engTasks, {
+                ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
+                ["params"] = { ["pattern"] = "Race-Track", ["speed"] = speed, ["altitude"] = alt }
+            })
+        elseif assignedRole == "SEAD" then
+            table.insert(engTasks, {
+                ["id"] = "EngageTargetsInZone", ["enabled"] = true, ["auto"] = false,
+                ["params"] = { ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z }, ["zoneRadius"] = 45000, ["targetTypes"] = { "Air Defence" }, ["priority"] = 0 }
+            })
+            table.insert(engTasks, {
+                ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
+                ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
+            })
+        else
+            table.insert(engTasks, {
+                ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
+                ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
+            })
+        end
+
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
+        })
+        table.insert(routePoints, {
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = targetPos.x, ["y"] = targetPos.z,
+            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = engTasks } }
+        })
+    end
+
+    local groupData = {
+        ["visible"] = true,
+        ["tasks"] = {},
+        ["uncontrolled"] = false,
+        ["task"] = grpTaskStr,
+        ["groupId"] = grpId,
+        ["name"] = grpName,
+        ["route"] = {
+            ["points"] = routePoints
+        },
+        ["units"] = {}
+    }
+
+    for uIdx = 1, tmpl.count do
+        local uName = string.format("%s_U%d", grpName, uIdx)
+        local offset = (uIdx - 1) * 60
+        local uData = {
+            ["type"] = tmpl.type,
+            ["unitId"] = grpId * 10 + uIdx,
+            ["name"] = uName,
+            ["x"] = startX + offset,
+            ["y"] = startZ + offset,
+            ["alt"] = alt,
+            ["speed"] = speed,
+            ["heading"] = origin.heading or 0,
+            ["skill"] = tmpl.skill or "High",
+            ["playerCanDrive"] = false,
+            ["payload"] = tmpl.payload or {}
+        }
+        table.insert(groupData.units, uData)
+    end
+
+    local ok, err = pcall(function()
+        coalition.addGroup(countryId, cat, groupData)
+        local grp = Group.getByName(grpName)
+        if grp then
+            local ctrl = grp:getController()
+            if ctrl then
+                ctrl:setOption(AI.Option.Air.id.ROE, AI.Option.Air.val.ROE.WEAPON_FREE)
+                ctrl:setOption(AI.Option.Air.id.RADAR_USING, AI.Option.Air.val.RADAR_USING.FOR_CONTINUOUS_SEARCH)
+
+                if assignedRole == "CAP" then
+                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
+                    ctrl:pushTask({
+                        ["id"] = "EngageTargets",
+                        ["enabled"] = true,
+                        ["auto"] = false,
+                        ["params"] = {
+                            ["targetTypes"] = { "Planes" },
+                            ["maxDist"] = 48000, -- Constrained to defensive quadrant bubble (48 km / ~26 NM)
+                            ["priority"] = 0
+                        }
+                    })
+                elseif assignedRole == "ESCORT" then
+                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
+                    ctrl:pushTask({
+                        ["id"] = "EngageTargets",
+                        ["enabled"] = true,
+                        ["auto"] = false,
+                        ["params"] = {
+                            ["targetTypes"] = { "Planes" },
+                            ["maxDist"] = 55000,
+                            ["priority"] = 0
+                        }
+                    })
+                elseif isStrike then
+                    -- Strike planes: NO air combat hunting! Bypass threats, deploy ECM/chaff/flares, kill ground SAMs and armor!
+                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.BYPASS_AND_ESCAPE)
+                    ctrl:setOption(AI.Option.Air.id.ECM_USING, AI.Option.Air.val.ECM_USING.USE_IF_ONLY_LOCK_BY_RADAR)
+
+                    local tgtGName = targetSec and targetSec.groupName
+                    local tgtGrp = tgtGName and Group.getByName(tgtGName)
+                    local atkType = (tmpl.type == "F-117-NightHawk") and "Level" or "Dive"
+                    if tgtGrp and tgtGrp:isExist() and tgtGrp:getSize() > 0 then
+                        ctrl:pushTask({
+                            ["id"] = "AttackGroup",
+                            ["enabled"] = true,
+                            ["auto"] = false,
+                            ["params"] = {
+                                ["groupId"] = tgtGrp:getID(),
+                                ["expend"] = "All",
+                                ["attackType"] = atkType
+                            }
+                        })
+                    else
+                        ctrl:pushTask({
+                            ["id"] = "EngageTargetsInZone",
+                            ["enabled"] = true,
+                            ["auto"] = false,
+                            ["params"] = {
+                                ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
+                                ["zoneRadius"] = 25000,
+                                ["targetTypes"] = { "Air Defence", "Ground Units" },
+                                ["priority"] = 0
+                            }
+                        })
+                    end
+                elseif assignedRole == "SEAD" then
+                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
+                    ctrl:pushTask({
+                        ["id"] = "EngageTargetsInZone",
+                        ["enabled"] = true,
+                        ["auto"] = false,
+                        ["params"] = {
+                            ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
+                            ["zoneRadius"] = 45000,
+                            ["targetTypes"] = { "Air Defence" },
+                            ["priority"] = 0
+                        }
+                    })
+                end
+            end
+
+            Director.activeGroups[side][grpName] = {
+                role = assignedRole,
+                target = targetSec and targetSec.name or "Contested Sector",
+                quadrant = targetQuadrant,
+                capSlot = capSlot,
+                spawnTime = timer.getTime()
+            }
+            local tgtName = targetSec and targetSec.name or "Contested Airspace"
+            local logMsg = string.format("AI DIRECTOR: Scrambled [%s] %s (%s x%d) from %s -> %s [%s]",
+                sideName, grpName, tmpl.type, tmpl.count, origin.name or "Staging", tgtName, targetQuadrant)
+            log(logMsg)
+            trigger.action.outText(string.format("TAC-COMM [%s]: %s (%d-ship %s) scrambled from %s -> %s [%s]",
+                sideName, tmpl.name, tmpl.count, tmpl.type, origin.name or targetQuadrant, tgtName, targetQuadrant), 10)
+        end
+    end)
+    if not ok then
+        log(string.format("AI DIRECTOR SPAWN ERROR [%s] %s: %s", sideName, grpName, tostring(err)))
+    end
+end
+
+-- ------------------------------------------------------------------------------
+-- 6. AUTONOMOUS DIRECTOR LOOP (Guaranteed Multi-Quadrant Distribution)
+-- ------------------------------------------------------------------------------
+function Director.Loop()
+    local now = timer.getTime()
+
+    -- 1. Periodic Autonomous R&D; each coalition can make one purchase per interval.
+    Director.EvaluateResearch(SIDE_BLUE, now)
+    Director.EvaluateResearch(SIDE_RED, now)
+
+    -- 2. Clean up destroyed or lost groups & apply Contention-style 3-minute scramble cooldowns
+    for side = 1, 2 do
+        for grpName, gData in pairs(Director.activeGroups[side]) do
+            local grp = Group.getByName(grpName)
+            if not grp or not grp:isExist() or grp:getSize() == 0 or (now - gData.spawnTime > 900) then
+                -- Group was destroyed or mission timed out!
+                if gData.role == "CAP" and gData.capSlot then
+                    -- 3-Minute Scramble Cooldown (180s)
+                    -- Simulates ramp preparation, taxi, takeoff roll, and scramble transit!
+                    Director.slotCooldowns[side][gData.capSlot] = now + 180
+                    local enemySide = (side == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
+                    local enemyName = (enemySide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
+                    local friendlyName = (side == SIDE_BLUE) and "BLUFOR" or "REDFOR"
+                    local frontLabel = (gData.capSlot == 1 or gData.capSlot == 4) and "West Front" or ((gData.capSlot == 2 or gData.capSlot == 5) and "East Front" or "Central Ridge")
+                    log(string.format("AI DIRECTOR: [%s] CAP (%s) lost! 3-minute scramble cooldown active. [%s] holds Air Superiority Window in %s!",
+                        friendlyName, frontLabel, enemyName, frontLabel))
+                    trigger.action.outText(string.format("TAC-COMM: [%s] CAP over %s destroyed! [%s] Air Superiority Window OPEN (3:00)!",
+                        friendlyName, frontLabel, enemyName), 12)
+                else
+                    -- Strike / Support role cooldown (120s / 2 minutes turnaround)
+                    Director.roleCooldowns[side][gData.role] = now + 120
+                end
+                Director.activeGroups[side][grpName] = nil
+            end
+        end
+    end
+
+    -- 3. Dedicated Fighter Dominance Across All Fronts (30 v 30 Fleet Architecture = 60 Active AI Aircraft):
+    --    Each coalition maintains 6x 2-ship CAP flights (12 Fighters per side, 24 Fighters total):
+    --    - Slot 1: West Front (NW for Red / SW for Blue)
+    --    - Slot 2: East Front (NE for Red / SE for Blue - Mineralnye Vody vs Senaki-Kolkhi)
+    --    - Slot 3: Central Contested Meridian Sweep (Maykop vs Gudauta)
+    --    - Slot 4: Coastal Defense Intercept (Krymsk vs Sochi)
+    --    - Slot 5: Eastern Mountain Barrier High Sweep (Mozdok vs Kutaisi)
+    --    - Slot 6: Central Frontline Intercept
+    local quadrantCapSlots = {
+        [SIDE_RED] = {
+            { quad = "NW", label = "NW Front (Krymsk)" },
+            { quad = "NE", label = "NE Front (Mineralnye Vody)" },
+            { quad = "CENTER", label = "Central Front Sweep" },
+            { quad = "NW", label = "NW Coastal Intercept" },
+            { quad = "NE", label = "NE High Sweep (Mozdok)" },
+            { quad = "CENTER", label = "Central Ridge Intercept" }
+        },
+        [SIDE_BLUE] = {
+            { quad = "SW", label = "SW Front (Sochi-Adler)" },
+            { quad = "SE", label = "SE Front (Senaki-Kolkhi)" },
+            { quad = "CENTER", label = "Central Front Sweep" },
+            { quad = "SW", label = "SW Coastal Intercept" },
+            { quad = "SE", label = "SE Valley High Sweep" },
+            { quad = "CENTER", label = "Central Ridge Intercept" }
+        }
+    }
+
+    -- Interleave CAP Spawning across slots and sides
+    local capFilled = { [SIDE_RED] = 0, [SIDE_BLUE] = 0 }
+    for slotIdx = 1, 6 do
+        for _, side in ipairs({ SIDE_RED, SIDE_BLUE }) do
+            local sDef = quadrantCapSlots[side][slotIdx]
+            local slotFilled = false
+            for _, gData in pairs(Director.activeGroups[side]) do
+                if gData.role == "CAP" and gData.capSlot == slotIdx then
+                    slotFilled = true
+                    capFilled[side] = capFilled[side] + 1
+                    break
+                end
+            end
+            if not slotFilled then
+                local cd = Director.slotCooldowns[side][slotIdx] or 0
+                if now >= cd then
+                    local targetSec = Director.SelectTargetSector("CAP", side, sDef.quad)
+                    Director.SpawnFlight(side, "CAP", targetSec, sDef.quad, slotIdx)
+                    return now + 8 -- Smooth 8-second pacing between individual scrambles
+                end
+                -- If slot is on cooldown (now < cd), NO REPLACEMENT SPAWNS!
+                -- This guarantees a 3-minute opening where the opposing side holds air superiority!
+            end
+        end
+    end
+
+    -- AIR SUPERIORITY INITIAL BUFFER:
+    -- At mission start, allow CAP fighters at least 60s to ingress and establish combat patrols
+    if now < 60 then
+        return now + 10
+    end
+
+    -- 4. Multi-Role Package Quotas & Air Superiority Window Exploitation:
+    --    When enemy CAP in a quadrant is destroyed, SEAD and Strike immediately scramble
+    --    to exploit the undefended airspace before the enemy's 3-minute cooldown expires!
+    local supportQuotas = {
+        { role = "SEAD", maxCount = 2 },      -- 2 flights x 2-ship = 4 SEAD jets per side
+        { role = "STRIKE", maxCount = 4 },    -- 4 flights x 2-ship = 8 Strike jets per side (A-4E-C / Su-25T)
+        { role = "ESCORT", maxCount = 2 },    -- 2 flights x 2-ship = 4 Escort fighters per side
+        { role = "LOGISTICS", maxCount = 1 }  -- 1 flight x 2-ship = 2 Cargo helos per side
+    }
+
+    for _, sq in ipairs(supportQuotas) do
+        local counts = {}
+        for _, side in ipairs({ SIDE_RED, SIDE_BLUE }) do
+            counts[side] = 0
+            for _, gData in pairs(Director.activeGroups[side]) do
+                if gData.role == sq.role then
+                    counts[side] = counts[side] + 1
+                end
+            end
+        end
+
+        if counts[SIDE_RED] < sq.maxCount or counts[SIDE_BLUE] < sq.maxCount then
+            local targetSide = (counts[SIDE_RED] <= counts[SIDE_BLUE]) and SIDE_RED or SIDE_BLUE
+            if counts[targetSide] >= sq.maxCount then
+                targetSide = (targetSide == SIDE_RED) and SIDE_BLUE or SIDE_RED
+            end
+
+            -- Check turnaround cooldown for this role (prevents endless wave spam):
+            local rCd = Director.roleCooldowns[targetSide][sq.role] or 0
+            if now >= rCd then
+                -- Determine which front has the open Air Superiority Window:
+                local enemySide = (targetSide == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
+                local enemyWestCap = false
+                local enemyEastCap = false
+                for _, egData in pairs(Director.activeGroups[enemySide]) do
+                    if egData.role == "CAP" then
+                        if egData.quadrant == "NW" or egData.quadrant == "SW" then
+                            enemyWestCap = true
+                        elseif egData.quadrant == "NE" or egData.quadrant == "SE" then
+                            enemyEastCap = true
+                        end
+                    end
+                end
+
+                -- Prioritize pushing into the front where enemy CAP is down!
+                local preferredFront = nil
+                if not enemyWestCap then
+                    preferredFront = (targetSide == SIDE_BLUE) and "SW" or "NW"
+                elseif not enemyEastCap then
+                    preferredFront = (targetSide == SIDE_BLUE) and "SE" or "NE"
+                else
+                    -- Both enemy CAPs active; alternate based on density
+                    local activeQuadrants = {}
+                    for _, gData in pairs(Director.activeGroups[targetSide]) do
+                        if gData.quadrant then
+                            activeQuadrants[gData.quadrant] = (activeQuadrants[gData.quadrant] or 0) + 1
+                        end
+                    end
+                    local westCount = (activeQuadrants["NW"] or 0) + (activeQuadrants["SW"] or 0)
+                    local eastCount = (activeQuadrants["NE"] or 0) + (activeQuadrants["SE"] or 0)
+                    preferredFront = (westCount > eastCount)
+                        and (targetSide == SIDE_BLUE and "SE" or "NE")
+                        or  (targetSide == SIDE_BLUE and "SW" or "NW")
+                end
+
+                local targetSec = Director.SelectTargetSector(sq.role, targetSide, preferredFront)
+                Director.SpawnFlight(targetSide, sq.role, targetSec, preferredFront)
+                return now + 8
+            end
+        end
+    end
+
+    return now + 15
+end
+
+function Director.Start()
+    if Director.initialized then return end
+    Director.initialized = true
+    local now = timer.getTime()
+    local readyAt = now + BF.Config.autonomousResearchInterval
+    Director.researchReadyAt[SIDE_BLUE] = readyAt
+    Director.researchReadyAt[SIDE_RED] = readyAt
+    log("=== BATTLEFRONT AIR WAR: AUTONOMOUS AI CAMPAIGN DIRECTOR STARTED ===")
+    timer.scheduleFunction(Director.Loop, nil, now + 10)
+end
+
+_G.BF_AIDirector = Director
