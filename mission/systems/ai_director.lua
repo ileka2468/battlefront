@@ -370,3 +370,201 @@ local BASELINE_TEMPLATES = {
     }
 }
 
+-- Advanced R&D Blueprints (Unlocked via research)
+local RESEARCH_TEMPLATES = {
+    [SIDE_BLUE] = {
+        ["F-22A"] = {
+            role = "CAP", type = "F-22A", count = 2, name = "BLUE_AI_STEALTH_F22", skill = "Excellent",
+            payload = { fuel = 6100, flare = 120, chaff = 120, gun = 100,
+                pylons = {
+                    [1] = { ["CLSID"] = "{AIM9X-BLKII}", ["clsid"] = "{AIM9X-BLKII}" },
+                    [11] = { ["CLSID"] = "{AIM9X-BLKII}", ["clsid"] = "{AIM9X-BLKII}" },
+                    [3] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" },
+                    [4] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" },
+                    [5] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" },
+                    [7] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" },
+                    [8] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" },
+                    [9] = { ["CLSID"] = "{AIM-120D-3}", ["clsid"] = "{AIM-120D-3}" }
+                } }
+        },
+        ["F-117A"] = {
+            role = "STRIKE", type = "F-117-NightHawk", count = 2, name = "BLUE_AI_STEALTH_STRIKE", skill = "High",
+            payload = { fuel = 5500, flare = 60, chaff = 60, gun = 0,
+                pylons = {
+                    [1] = { ["CLSID"] = "{EF0A9419-01D6-473B-99A3-BEBDB923B14D}", ["clsid"] = "{EF0A9419-01D6-473B-99A3-BEBDB923B14D}" },
+                    [2] = { ["CLSID"] = "{EF0A9419-01D6-473B-99A3-BEBDB923B14D}", ["clsid"] = "{EF0A9419-01D6-473B-99A3-BEBDB923B14D}" }
+                } }
+        }
+    },
+    [SIDE_RED] = {
+        ["Su-30SM"] = {
+            role = "ESCORT", type = "Su-30SM", count = 2, name = "RED_AI_ESCORT_SU30", skill = "Excellent",
+            payload = { fuel = 9400, flare = 96, chaff = 96, gun = 100,
+                pylons = {
+                    [1] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" },
+                    [2] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" },
+                    [3] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [4] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [5] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [6] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" }
+                } }
+        },
+        ["Su-34"] = {
+            role = "STRIKE", type = "Su-34", count = 2, name = "RED_AI_STRIKE_SU34", skill = "High",
+            payload = { fuel = 11400, flare = 120, chaff = 120, gun = 100,
+                pylons = {
+                    [1]  = { ["CLSID"] = "{44EE8698-89F9-48EE-AF36-5FD31896A82F}", ["clsid"] = "{44EE8698-89F9-48EE-AF36-5FD31896A82F}" }, -- L-175V Khibiny ECM Wingtip Left
+                    [2]  = { ["CLSID"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}", ["clsid"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}" }, -- R-73 Self-Defense
+                    [3]  = { ["CLSID"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}", ["clsid"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}" }, -- KAB-500Kr TV-Guided Bomb
+                    [4]  = { ["CLSID"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}", ["clsid"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}" }, -- KAB-500Kr TV-Guided Bomb
+                    [5]  = { ["CLSID"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}", ["clsid"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}" }, -- FAB-250 High Explosive Bomb
+                    [6]  = { ["CLSID"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}", ["clsid"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}" }, -- FAB-250 High Explosive Bomb
+                    [7]  = { ["CLSID"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}", ["clsid"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}" }, -- FAB-250 High Explosive Bomb
+                    [8]  = { ["CLSID"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}", ["clsid"] = "{3C612111-C7AD-476E-8A8E-2485812F4E5C}" }, -- FAB-250 High Explosive Bomb
+                    [9]  = { ["CLSID"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}", ["clsid"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}" }, -- KAB-500Kr TV-Guided Bomb
+                    [10] = { ["CLSID"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}", ["clsid"] = "{FC56DF80-9B09-44C5-8976-DCFAFF219062}" }, -- KAB-500Kr TV-Guided Bomb
+                    [11] = { ["CLSID"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}", ["clsid"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}" }, -- R-73 Self-Defense
+                    [12] = { ["CLSID"] = "{44EE8698-89F9-48EE-AF36-5FD31896A82A}", ["clsid"] = "{44EE8698-89F9-48EE-AF36-5FD31896A82A}" }  -- L-175V Khibiny ECM Wingtip Right
+                } }
+        },
+        ["Su-35S"] = {
+            role = "CAP", type = "Su-35S", count = 2, name = "RED_AI_CAP_SU35S", skill = "High",
+            payload = { fuel = 11500, flare = 96, chaff = 96, gun = 100,
+                pylons = {
+                    [1] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" },
+                    [2] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" },
+                    [3] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [4] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [7] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" },
+                    [8] = { ["CLSID"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}", ["clsid"] = "{42F377FD-78DE-4841-8636-ECB8EB5F3255}" }
+                } }
+        },
+        ["Su-57"] = {
+            role = "CAP", type = "Su-57", count = 2, name = "RED_AI_STEALTH_SU57", skill = "Excellent",
+            payload = { fuel = 10300, flare = 120, chaff = 120, gun = 100,
+                pylons = {
+                    [1] = { ["CLSID"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}", ["clsid"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}" },
+                    [2] = { ["CLSID"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}", ["clsid"] = "{FBC29BFE-3D24-4C64-B81D-941239D12249}" },
+                    [3] = { ["CLSID"] = "{RVV-BD}", ["clsid"] = "{RVV-BD}" },
+                    [4] = { ["CLSID"] = "{RVV-BD}", ["clsid"] = "{RVV-BD}" },
+                    [5] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" },
+                    [6] = { ["CLSID"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}", ["clsid"] = "{B4C01D60-A8A3-4237-BD72-CA7655BC0FE9}" }
+                } }
+        },
+        ["J-20A"] = {
+            role = "CAP", type = "J-20A", count = 2, name = "RED_AI_STEALTH_J20A", skill = "Excellent",
+            payload = { fuel = 11000, flare = 120, chaff = 120, gun = 100,
+                pylons = {
+                    [1] = { ["CLSID"] = "{J20A_PL-10E}", ["clsid"] = "{J20A_PL-10E}" },
+                    [2] = { ["CLSID"] = "{J20A_PL-10E}", ["clsid"] = "{J20A_PL-10E}" },
+                    [3] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" },
+                    [4] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" },
+                    [5] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" },
+                    [6] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" },
+                    [7] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" },
+                    [8] = { ["CLSID"] = "{J20A_PL15}", ["clsid"] = "{J20A_PL15}" }
+                } }
+        }
+    }
+}
+
+-- Resolve whether an advanced aircraft is unlocked via research, or fallback to baseline
+function Director.ResolveTemplate(side, role)
+    local coal = BF.State and BF.State.coalitions and BF.State.coalitions[side]
+    local unlocked = coal and coal.unlockedBlueprints or {}
+
+    if side == SIDE_BLUE then
+        if role == "CAP" then
+            if unlocked["F-22A"] then
+                return RESEARCH_TEMPLATES[SIDE_BLUE]["F-22A"]
+            else
+                return BASELINE_TEMPLATES[SIDE_BLUE]["F-15C_CAP"]
+            end
+        elseif role == "ESCORT" then
+            return BASELINE_TEMPLATES[SIDE_BLUE]["F-16C_ESCORT"]
+        elseif role == "STRIKE" then
+            if unlocked["F-117A"] then
+                return RESEARCH_TEMPLATES[SIDE_BLUE]["F-117A"]
+            else
+                local r = math.random(1, 10)
+                if r <= 6 and unlocked["A-4E-C"] then
+                    return BASELINE_TEMPLATES[SIDE_BLUE]["A-4E_STRIKE"]
+                elseif r <= 8 then
+                    return BASELINE_TEMPLATES[SIDE_BLUE]["A-10A_STRIKE"]
+                else
+                    return BASELINE_TEMPLATES[SIDE_BLUE]["FA-18C_STRIKE"]
+                end
+            end
+        elseif role == "SEAD" then
+            -- High-speed multirole SEAD parity (F-16C HARM / F/A-18C HARM)
+            return (math.random(1, 2) == 1) and BASELINE_TEMPLATES[SIDE_BLUE]["FA-18C_SEAD"] or BASELINE_TEMPLATES[SIDE_BLUE]["F-16C_SEAD"]
+        elseif role == "LOGISTICS" then
+            local key = unlocked["UH-60L"] and "UH-60L_CARGO" or "UH-1H_CARGO"
+            return BASELINE_TEMPLATES[SIDE_BLUE][key]
+        end
+    else -- SIDE_RED
+        if role == "CAP" then
+            if unlocked["J-20A"] then
+                return RESEARCH_TEMPLATES[SIDE_RED]["J-20A"]
+            elseif unlocked["Su-57"] then
+                return RESEARCH_TEMPLATES[SIDE_RED]["Su-57"]
+            elseif unlocked["Su-35S"] then
+                return RESEARCH_TEMPLATES[SIDE_RED]["Su-35S"]
+            else
+                return (math.random(1, 2) == 1) and BASELINE_TEMPLATES[SIDE_RED]["Su-27_CAP"] or BASELINE_TEMPLATES[SIDE_RED]["MiG-29S_CAP"]
+            end
+        elseif role == "ESCORT" then
+            if unlocked["Su-30SM"] then
+                return RESEARCH_TEMPLATES[SIDE_RED]["Su-30SM"]
+            else
+                return BASELINE_TEMPLATES[SIDE_RED]["Su-27_ESCORT"]
+            end
+        elseif role == "STRIKE" then
+            -- Tier 1 Baseline Strike: Su-25T armored ground attack; Su-34 unlocked only via R&D
+            if unlocked["Su-34"] then
+                return RESEARCH_TEMPLATES[SIDE_RED]["Su-34"]
+            else
+                return BASELINE_TEMPLATES[SIDE_RED]["Su-25T_STRIKE"]
+            end
+        elseif role == "SEAD" then
+            -- Tier 1 Baseline SEAD: Su-25T tactical SEAD; Su-34 supersonic SEAD unlocked via R&D
+            if unlocked["Su-34"] then
+                return BASELINE_TEMPLATES[SIDE_RED]["Su-34_SEAD"]
+            else
+                return BASELINE_TEMPLATES[SIDE_RED]["Su-25T_SEAD"]
+            end
+        elseif role == "LOGISTICS" then
+            return BASELINE_TEMPLATES[SIDE_RED]["Mi-24P_CARGO"]
+        end
+    end
+
+    return BASELINE_TEMPLATES[side]["F-15C_CAP"] or BASELINE_TEMPLATES[side]["Su-27_CAP"]
+end
+
+-- ------------------------------------------------------------------------------
+-- 3. AUTONOMOUS CAMPAIGN RESEARCH ENGINE (AI Purchases Blueprints)
+-- ------------------------------------------------------------------------------
+function Director.EvaluateResearch(side, now)
+    local cfg = BF.Config
+    if not cfg or cfg.allowAutonomousResearch ~= true then return false, "disabled" end
+    local coal = BF.State and BF.State.coalitions and BF.State.coalitions[side]
+    local researchQueue = cfg.autonomousResearchOrder[side]
+    if not coal or not researchQueue then return false, "unknown_coalition" end
+
+    local due = Director.researchReadyAt[side]
+    if not due then
+        Director.researchReadyAt[side] = now + cfg.autonomousResearchInterval
+        return false, "not_due"
+    end
+    if now < due then return false, "not_due" end
+    Director.researchReadyAt[side] = now + cfg.autonomousResearchInterval
+
+    -- Save for the next priority instead of exhausting the budget on random cheaper upgrades.
+    for _, bpKey in ipairs(researchQueue) do
+        if cfg.blueprints[side][bpKey] and not coal.unlockedBlueprints[bpKey] then
+            return BF.PurchaseBlueprint(side, bpKey, "director")
+        end
+    end
+    return false, "complete"
+end
+
