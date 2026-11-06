@@ -1,0 +1,156 @@
+{
+  "AIM-120D": {
+    "name": "AIM-120D AMRAAM",
+    "type": "Extended Range Fox-3",
+    "coalition": "BLUFOR",
+    "cost_points": 4,
+    "range_km": 140,
+    "mach": 4.0,
+    "compatible": [
+      "F-15C",
+      "F-16C_50",
+      "FA-18C_hornet",
+      "F-22A"
+    ],
+    "desc": "Two-way datalink and GPS-guided navigation enhancement to standard AMRAAM envelope."
+  },
+  "AGM-88C": {
+    "name": "AGM-88C HARM",
+    "type": "High-Speed Anti-Radiation Missile",
+    "coalition": "BLUFOR",
+    "cost_points": 6,
+    "range_km": 110,
+    "mach": 3.0,
+    "compatible": [
+      "F-16C_50",
+      "FA-18C_hornet"
+    ],
+    "desc": "Suppression of Enemy Air Defenses (SEAD) weapon designed to home in on enemy radar emissions."
+  },
+  "GBU-39": {
+    "name": "GBU-39 SDB",
+    "type": "Precision Guided Glide Bomb",
+    "coalition": "BLUFOR",
+    "cost_points": 10,
+    "range_km": 110,
+    "mach": 0.9,
+    "compatible": [
+      "F-16C_50",
+      "FA-18C_hornet",
+      "F-22A"
+    ],
+    "desc": "Small Diameter Bomb allowing 4x multi-target strikes per BRU-61 rack with high standoff."
+  },
+  "GBU-27": {
+    "name": "GBU-27 Paveway III",
+    "type": "Hardened Bunker Penetrator",
+    "coalition": "BLUFOR",
+    "cost_points": 12,
+    "range_km": 20,
+    "mach": 0.85,
+    "compatible": [
+      "F-16C_50",
+      "FA-18C_hornet",
+      "F-117-NightHawk"
+    ],
+    "desc": "2,000 lb BLU-109 laser-guided penetrator engineered to crack subterranean C2 fortresses."
+  },
+  "AIM-260": {
+    "name": "AIM-260 JATM",
+    "type": "Next-Gen BVR Fox-3",
+    "coalition": "BLUFOR",
+    "cost_points": 18,
+    "range_km": 200,
+    "mach": 4.5,
+    "compatible": [
+      "F-15C",
+      "F-16C_50",
+      "FA-18C_hornet",
+      "F-22A"
+    ],
+    "desc": "Joint Advanced Tactical Missile. Long-range ramjet Fox-3 with high no-escape envelope."
+  },
+  "AIM-174B": {
+    "name": "AIM-174B Gunslinger",
+    "type": "VVLRAAM (Air-Launched SM-6)",
+    "coalition": "BLUFOR",
+    "cost_points": 25,
+    "range_km": 400,
+    "mach": 4.3,
+    "compatible": [
+      "FA-18C_hornet",
+      "F-14B"
+    ],
+    "desc": "Ultra long-range hypersonic fleet defense interceptor missile. Dominates extreme standoff BVR."
+  },
+  "R-77-1": {
+    "name": "R-77-1 (AA-12 Adder)",
+    "type": "Upgraded Active Radar AAM",
+    "coalition": "REDFOR",
+    "cost_points": 4,
+    "range_km": 110,
+    "mach": 4.0,
+    "compatible": [
+      "Su-27",
+      "Su-33",
+      "MiG-29S",
+      "Su-35S",
+      "Su-57"
+    ],
+    "desc": "Streamlined radome and active radar homing head for reliable mid-range engagements."
+  },
+  "Kh-31P": {
+    "name": "Kh-31P (AS-17 Krypton)",
+    "type": "Mach 3+ Supersonic Anti-Radiation",
+    "coalition": "REDFOR",
+    "cost_points": 10,
+    "range_km": 110,
+    "mach": 3.3,
+    "compatible": [
+      "Su-25T",
+      "Su-30SM",
+      "Su-35S",
+      "Su-34"
+    ],
+    "desc": "High-velocity ramjet anti-radar missile designed to overwhelm Patriot and Hawk battery response times."
+  },
+  "PL-15": {
+    "name": "PL-15 Dual-Pulse",
+    "type": "Active Radar Long-Range AAM",
+    "coalition": "REDFOR",
+    "cost_points": 18,
+    "range_km": 150,
+    "mach": 4.0,
+    "compatible": [
+      "J-20A",
+      "JF-17"
+    ],
+    "desc": "Dual-pulse solid rocket motor missile with extended no-escape zone."
+  },
+  "R-37M": {
+    "name": "R-37M Axehead",
+    "type": "Hypersonic VVLRAAM",
+    "coalition": "REDFOR",
+    "cost_points": 22,
+    "range_km": 300,
+    "mach": 6.0,
+    "compatible": [
+      "MiG-31BM",
+      "Su-35S",
+      "Su-57"
+    ],
+    "desc": "Very long-range Mach 6 sniper missile designed for AWACS, tanker, and high-altitude intercept."
+  },
+  "Kh-47M2": {
+    "name": "Kh-47M2 Kinzhal",
+    "type": "Aero-Ballistic Hypersonic Strike",
+    "coalition": "REDFOR",
+    "cost_points": 25,
+    "range_km": 450,
+    "mach": 10.0,
+    "compatible": [
+      "MiG-31K"
+    ],
+    "desc": "Hypersonic aero-ballistic missile with devastating kinetic impact on hardened structures."
+  }
+}
