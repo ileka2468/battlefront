@@ -417,3 +417,308 @@ class CampaignManager:
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
+    def get_campaign_status(self) -> Dict[str, Any]:
+        state = self.load_state()
+        now = time.time()
+
+        # Check collapse condition & countdown timers
+        for side_key in ["1", "2"]:
+            coal = state["coalitions"][side_key]
+            
+            # Auto-detect collapse entry
+            if not coal.get("in_collapse"):
+                if coal.get("treasury", 0) <= 0 and coal.get("hourly_income", 0) < state.get("mvi_threshold_million", 80):
+                    coal["in_collapse"] = True
+                    coal["collapse_started_at"] = now
+                    coal["collapse_remaining_seconds"] = state.get("collapse_duration_seconds", 2700)
+            else:
+                # Auto-detect recovery
+                if coal.get("treasury", 0) >= state.get("solvency_threshold_million", 300) or \
+                   (coal.get("hourly_income", 0) >= state.get("mvi_threshold_million", 80) and coal.get("treasury", 0) >= 100):
+                    coal["in_collapse"] = False
+                    coal["collapse_started_at"] = None
+                    coal["collapse_remaining_seconds"] = state.get("collapse_duration_seconds", 2700)
+                elif coal.get("collapse_started_at"):
+                    elapsed = now - coal["collapse_started_at"]
+                    remaining = max(0, state["collapse_duration_seconds"] - int(elapsed))
+                    coal["collapse_remaining_seconds"] = remaining
+
+                    if remaining <= 0 and not state["victory"]["won"]:
+                        state["victory"]["won"] = True
+                        winner = 2 if side_key == "1" else 1
+                        winner_name = "BLUFOR" if winner == 2 else "REDFOR"
+                        loser_name = coal.get("name", f"Coalition {side_key}")
+                        state["victory"]["winner_side"] = winner
+                        state["victory"]["victory_type"] = "ECONOMIC"
+                        state["victory"]["victory_message"] = (
+                            f"{winner_name} has won the war through Economic Collapse! "
+                            f"{loser_name} failed to restore solvency within the grace period."
+                        )
+                        state["victory"]["victory_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Check human commander expiry
+            if coal.get("human_commander") and coal.get("human_commander_expires", 0) < now:
+                coal["human_commander"] = None
+                if side_key in state.get("operations", {}):
+                    state["operations"][side_key]["coordinator"] = "AI Tactical Command"
+
+        # Check Territorial Victory
+        if not state["victory"]["won"]:
+            for s_key in ["1", "2"]:
+                c = state["coalitions"][s_key]
+                side_int = int(s_key)
+                if c.get("controlled_sectors", 0) >= state.get("total_objectives", 21) or \
+                   (state.get("sectors") and all(sec.get("side") == side_int for sec in state["sectors"])):
+                    state["victory"]["won"] = True
+                    state["victory"]["winner_side"] = side_int
+                    winner_name = c.get("name", f"Coalition {s_key}")
+                    state["victory"]["victory_type"] = "TERRITORIAL"
+                    state["victory"]["victory_message"] = f"{winner_name} has achieved Total Territorial Conquest!"
+                    state["victory"]["victory_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    break
+
+        self.save_state(state)
+        # Attach airframe upgrade catalog with dynamic unlock states
+        state["airframe_upgrades"] = self.get_airframe_upgrades().get("catalog", {})
+        return state
+
+    def join_operation_slot(self, player_id: str, side: int, slot_idx: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        op = state["operations"].get(side_key)
+        if not op:
+            return {"success": False, "error": "No active operation for coalition."}
+
+        slots = op["slots"]
+        if slot_idx < 0 or slot_idx >= len(slots):
+            return {"success": False, "error": "Invalid slot index."}
+
+        target_slot = slots[slot_idx]
+        if target_slot.get("pilot") and target_slot["pilot"] != player_id:
+            return {"success": False, "error": f"Slot {slot_idx} is already occupied by {target_slot['pilot']}."}
+
+        # Clear player from any other slots in this operation first
+        for idx, s in enumerate(slots):
+            if s.get("pilot") == player_id:
+                s["pilot"] = None
+                s["status"] = "OPEN"
+
+        target_slot["pilot"] = player_id
+        target_slot["status"] = "CLAIMED"
+
+        # Update readiness with required-role validation
+        claimed_count = sum(1 for s in slots if s.get("pilot"))
+        has_strike = any(s.get("pilot") and s.get("role") == "STRIKE" for s in slots)
+        if claimed_count >= 4 and has_strike:
+            op["status"] = "CLEARED HOT"
+        elif claimed_count >= 2:
+            op["status"] = "FORMING"
+        else:
+            op["status"] = "RECRUITING"
+
+        self.save_state(state)
+        return {
+            "success": True,
+            "operation": op,
+            "claimed_slot": slot_idx,
+            "pilot": player_id
+        }
+
+    def leave_operation_slot(self, player_id: str, side: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        op = state["operations"].get(side_key)
+        if not op:
+            return {"success": False, "error": "No active operation."}
+
+        for s in op["slots"]:
+            if s.get("pilot") == player_id:
+                s["pilot"] = None
+                s["status"] = "OPEN"
+
+        claimed_count = sum(1 for s in op["slots"] if s.get("pilot"))
+        has_strike = any(s.get("pilot") and s.get("role") == "STRIKE" for s in op["slots"])
+        if claimed_count >= 4 and has_strike:
+            op["status"] = "CLEARED HOT"
+        elif claimed_count >= 2:
+            op["status"] = "FORMING"
+        else:
+            op["status"] = "RECRUITING"
+
+        self.save_state(state)
+        return {"success": True, "operation": op}
+
+    def propose_operation(self, player_id: str, side: int, target_sector: str) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        target_info = next((s for s in state["sectors"] if s["name"] == target_sector), None)
+        if not target_info:
+            return {"success": False, "error": f"Unknown target sector '{target_sector}'."}
+            
+        if target_info.get("side") == side:
+            return {"success": False, "error": f"Cannot propose offensive strike against friendly-owned sector '{target_sector}'."}
+
+        current_op = state["operations"].get(side_key)
+        has_recruits = current_op and any(s.get("pilot") for s in current_op.get("slots", []))
+        
+        op_id = f"op_{int(time.time())}"
+        op_title = f"Operation {target_sector.split()[0]} Strike"
+        quad = target_info["quadrant"] if target_info else "Contested"
+        freq = "251.000 MHz UHF" if side == 2 else "252.000 MHz UHF"
+
+        new_op = {
+            "id": op_id,
+            "name": op_title,
+            "target_sector": target_sector,
+            "target_quadrant": quad,
+            "mission_type": "Strategic Strike Package",
+            "coordinator": f"Pilot Proposal ({player_id})",
+            "frequency": freq,
+            "objective_desc": f"Package organized per request from {player_id}. Interdict hostile assets at {target_sector}.",
+            "status": "QUEUED" if has_recruits else "RECRUITING",
+            "slots": [
+                {"role": "STRIKE", "role_title": "Lead Strike Flight", "airframes": "Strike Aircraft", "pilot": player_id, "status": "CLAIMED"},
+                {"role": "STRIKE", "role_title": "Secondary Strike", "airframes": "Strike Aircraft", "pilot": None, "status": "OPEN"},
+                {"role": "ESCORT", "role_title": "Air Superiority Escort", "airframes": "Fighter Sweep", "pilot": None, "status": "OPEN"},
+                {"role": "ESCORT", "role_title": "Barrier CAP", "airframes": "Interceptor", "pilot": None, "status": "OPEN"},
+                {"role": "SEAD", "role_title": "Defense Suppression", "airframes": "SEAD Flight", "pilot": None, "status": "OPEN"},
+                {"role": "LOGISTICS", "role_title": "Ground Logistics", "airframes": "Cargo / Helo", "pilot": None, "status": "OPEN"}
+            ]
+        }
+
+        if has_recruits:
+            state.setdefault("queued_operations", {}).setdefault(side_key, []).append(new_op)
+            self.save_state(state)
+            return {"success": True, "queued": True, "message": "Active operation preserved; new proposal added to queue.", "operation": current_op}
+
+        state["operations"][side_key] = new_op
+        self.save_state(state)
+        return {"success": True, "operation": new_op}
+
+    def assume_command(self, player_id: str, side: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        coal = state["coalitions"][side_key]
+        now = time.time()
+
+        if coal.get("human_commander") == player_id:
+            # Relinquish command back to AI
+            coal["human_commander"] = None
+            coal["human_commander_expires"] = 0
+            if side_key in state["operations"]:
+                state["operations"][side_key]["coordinator"] = "AI Tactical Command"
+            self.save_state(state)
+            return {"success": True, "human_commander": None, "message": "Command relinquished to AI Tactical Command."}
+        elif coal.get("human_commander") and coal.get("human_commander_expires", 0) > now:
+            return {"success": False, "error": f"Command lease already held by {coal['human_commander']}."}
+        else:
+            coal["human_commander"] = player_id
+            coal["human_commander_expires"] = now + 900 # 15 minutes
+            if side_key in state["operations"]:
+                state["operations"][side_key]["coordinator"] = f"Commander {player_id}"
+            self.save_state(state)
+            return {"success": True, "human_commander": player_id, "message": f"{player_id} has assumed Coalition Command."}
+
+    def trigger_economic_collapse_test(self, side: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        coal = state["coalitions"][side_key]
+        coal["treasury"] = 0
+        coal["hourly_income"] = 60 # Below MVI ($80M)
+        coal["in_collapse"] = True
+        coal["collapse_started_at"] = time.time()
+        coal["collapse_remaining_seconds"] = state["collapse_duration_seconds"]
+        self.save_state(state)
+        return {"success": True, "coalition": coal}
+
+    def restore_economic_solvency_test(self, side: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        coal = state["coalitions"][side_key]
+        coal["treasury"] = 350 # Above $300M threshold
+        coal["hourly_income"] = 240
+        coal["in_collapse"] = False
+        coal["collapse_started_at"] = None
+        coal["collapse_remaining_seconds"] = state["collapse_duration_seconds"]
+        self.save_state(state)
+        return {"success": True, "coalition": coal}
+
+    def get_airframe_upgrades(self, side: Optional[int] = None) -> Dict[str, Any]:
+        state = self.load_state()
+        blue_unlocked = state["coalitions"].get("2", {}).get("unlocked_upgrades", {})
+        red_unlocked = state["coalitions"].get("1", {}).get("unlocked_upgrades", {})
+
+        result = {}
+        for key, airframe in AIRFRAME_UPGRADE_CATALOG.items():
+            if side is not None and airframe["coalition"] != side:
+                continue
+            af_copy = dict(airframe)
+            af_coal_str = str(airframe["coalition"])
+            unlocked_dict = blue_unlocked if af_coal_str == "2" else red_unlocked
+
+            t1 = dict(airframe["track1"])
+            t1["unlocked"] = bool(unlocked_dict.get(t1["id"]))
+
+            t2 = dict(airframe["track2"])
+            t2["unlocked"] = bool(unlocked_dict.get(t2["id"]))
+
+            af_copy["track1"] = t1
+            af_copy["track2"] = t2
+            result[key] = af_copy
+
+        return {
+            "success": True,
+            "catalog": result,
+            "bluefor_treasury": state["coalitions"].get("2", {}).get("treasury", 0),
+            "redfor_treasury": state["coalitions"].get("1", {}).get("treasury", 0)
+        }
+
+    def purchase_airframe_upgrade(self, side: int, airframe_key: str, track_id: int) -> Dict[str, Any]:
+        state = self.load_state()
+        side_key = str(side)
+        if side_key not in state["coalitions"]:
+            return {"success": False, "error": f"Invalid coalition side: {side}"}
+
+        airframe = AIRFRAME_UPGRADE_CATALOG.get(airframe_key)
+        if not airframe:
+            return {"success": False, "error": f"Airframe '{airframe_key}' not found in upgrade catalog."}
+
+        if airframe["coalition"] != side:
+            return {"success": False, "error": f"Airframe '{airframe['name']}' belongs to {airframe['coalition_name']}, not coalition {side}."}
+
+        track_key = f"track{track_id}"
+        if track_key not in airframe:
+            return {"success": False, "error": f"Invalid track ID {track_id}. Must be 1 or 2."}
+
+        track_data = airframe[track_key]
+        upgrade_id = track_data["id"]
+        cost = track_data["cost"]
+
+        coal = state["coalitions"][side_key]
+        unlocked = coal.setdefault("unlocked_upgrades", {})
+
+        if unlocked.get(upgrade_id):
+            return {"success": False, "error": f"Upgrade '{track_data['title']}' is already unlocked and operational!"}
+
+        current_treasury = coal.get("treasury", 0)
+        if current_treasury < cost:
+            return {
+                "success": False,
+                "error": f"Insufficient war chest for {track_data['title']}! Required: ${cost}M | Available: ${current_treasury:.1f}M."
+            }
+
+        coal["treasury"] -= cost
+        unlocked[upgrade_id] = True
+        self.save_state(state)
+
+        return {
+            "success": True,
+            "airframe": airframe["name"],
+            "track": track_id,
+            "upgrade_id": upgrade_id,
+            "upgrade_title": track_data["title"],
+            "cost": cost,
+            "new_treasury": coal["treasury"],
+            "message": f"★★★ R&D MODERNIZATION COMPLETE ★★★\n{airframe['name']} - {track_data['title']} authorized! (${cost}M allocated)."
+        }
+
