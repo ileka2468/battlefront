@@ -1,0 +1,149 @@
+[
+  {
+    "id": 101,
+    "name": "Krasnodar Silicon Fab",
+    "side": 1,
+    "x": -12000,
+    "z": 370000
+  },
+  {
+    "id": 102,
+    "name": "Novorossiysk Oil Refinery",
+    "side": 1,
+    "x": -25000,
+    "z": 320000
+  },
+  {
+    "id": 103,
+    "name": "Krymsk Airfield Base",
+    "side": 1,
+    "x": -7500,
+    "z": 294000
+  },
+  {
+    "id": 104,
+    "name": "Anapa Marine Fuel Terminal",
+    "side": 1,
+    "x": -6000,
+    "z": 240000
+  },
+  {
+    "id": 105,
+    "name": "Slavyansk Chemical & Propellant Plant",
+    "side": 1,
+    "x": 12000,
+    "z": 315000
+  },
+  {
+    "id": 106,
+    "name": "Armavir Metallurgy Complex",
+    "side": 1,
+    "x": -35000,
+    "z": 520000
+  },
+  {
+    "id": 107,
+    "name": "Maykop Aerospace Center",
+    "side": 1,
+    "x": -20000,
+    "z": 475000
+  },
+  {
+    "id": 108,
+    "name": "Nalchik C2 Fortress",
+    "side": 1,
+    "x": -125487,
+    "z": 759560
+  },
+  {
+    "id": 109,
+    "name": "Mineralnye Vody Forward FARP",
+    "side": 1,
+    "x": -52089,
+    "z": 707418
+  },
+  {
+    "id": 110,
+    "name": "Mozdok Strategic Bomber Hub",
+    "side": 1,
+    "x": -83329,
+    "z": 835634
+  },
+  {
+    "id": 111,
+    "name": "Sochi Strategic Harbor",
+    "side": 2,
+    "x": -150000,
+    "z": 445000
+  },
+  {
+    "id": 112,
+    "name": "Sukhumi Munitions Plant",
+    "side": 2,
+    "x": -221381,
+    "z": 565908
+  },
+  {
+    "id": 113,
+    "name": "Gudauta Forward Staging Strip",
+    "side": 2,
+    "x": -195650,
+    "z": 515898
+  },
+  {
+    "id": 114,
+    "name": "Gagra Coastal Defense Outpost",
+    "side": 2,
+    "x": -180000,
+    "z": 490000
+  },
+  {
+    "id": 115,
+    "name": "Adler High-Tech Sensor Lab",
+    "side": 2,
+    "x": -165163,
+    "z": 460901
+  },
+  {
+    "id": 116,
+    "name": "Poti Deepwater Refinery",
+    "side": 2,
+    "x": -278500,
+    "z": 629000
+  },
+  {
+    "id": 117,
+    "name": "Kutaisi Silicon & Avionics Fab",
+    "side": 2,
+    "x": -284582,
+    "z": 685029
+  },
+  {
+    "id": 118,
+    "name": "Batumi Metallurgy Drydocks",
+    "side": 2,
+    "x": -354000,
+    "z": 621000
+  },
+  {
+    "id": 119,
+    "name": "Kobuleti Stealth Skunkworks",
+    "side": 2,
+    "x": -317604,
+    "z": 636704
+  },
+  {
+    "id": 120,
+    "name": "Tskhaltubo Joint C2 Complex",
+    "side": 2,
+    "x": -270000,
+    "z": 680000
+  },
+  {
+    "id": 121,
+    "name": "Senaki-Kolkhi Airbase",
+    "side": 2,
+    "x": -281903,
+    "z": 648379
+  }
+]
