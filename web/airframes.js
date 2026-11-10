@@ -40,6 +40,13 @@ const BattlefrontAirframes = (() => {
     "MiG-31":jet({name:"MiG-31 Foxhound",wing:3.78,length:1.14,tail:2,engines:2,tip:-.49,tipBack:-1.78,
       shoulders:true,tandem:true,engineSpread:.61,radius:.77}),
     "C-130":jet({name:"C-130 Hercules",wing:6.1,radius:1.04,tailplane:2.35,prop:true,highWing:true,transport:true,engines:0}),
+    "E-3":jet({name:"E-3 Sentry",wing:5.68,radius:.73,tailplane:1.95,radar:true,transport:true,pods:4,engines:0}),
+    "A-50":jet({name:"A-50 Mainstay",wing:5.35,radius:.88,tailplane:2.05,radar:true,transport:true,pods:4,highWing:true,tee:true,engines:0}),
+    "UH-60":{name:"UH-60 Black Hawk",rotor:true,width:1,stub:.8},
+    "Mi-24":{name:"Mi-24 Hind",rotor:true,width:.83,tandem:true,stub:2.2},
+    "Mi-8":{name:"Mi-8 Hip",rotor:true,width:1.05,stub:.5,transport:true},
+    "AH-64":{name:"AH-64 Apache",rotor:true,width:.7,tandem:true,stub:1.75},
+    "AV-8":jet({name:"AV-8B Harrier",wing:3.42,radius:.72,tip:-.56,tipBack:-1.88,shoulders:true}),
   };
   const names = Object.keys(profiles).sort((a,b)=>b.length-a.length);
   function keyFor(type) {
