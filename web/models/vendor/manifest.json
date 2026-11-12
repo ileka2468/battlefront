@@ -1,0 +1,160 @@
+{
+  "A-10": {
+    "file": "/models/vendor/a-10.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/A-10/Models/A10-004-015l3.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 13104,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "A-10"
+  },
+  "A-4": {
+    "file": "/models/vendor/a-4.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/a4/Models/a4f.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 18137,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "a4"
+  },
+  "C-130": {
+    "file": "/models/vendor/c-130.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/C130/Models/c130.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 34210,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "C130"
+  },
+  "E-3": {
+    "file": "/models/vendor/e-3.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/E3B/Models/E3B.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 12311,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "E3B"
+  },
+  "F-15": {
+    "file": "/models/vendor/f-15.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/F-15/Models/f15c.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 165981,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "F-15"
+  },
+  "F-16": {
+    "file": "/models/vendor/f-16.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/f16/Models/f16.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 15905,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "f16"
+  },
+  "F/A-18": {
+    "file": "/models/vendor/fa-18.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/f18/Models/f18.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 16174,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "f18"
+  },
+  "F-14": {
+    "file": "/models/vendor/f-14.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/f-14b/Models/f-14b.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 19852,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "f-14b"
+  },
+  "F-117": {
+    "file": "/models/vendor/f-117.glb",
+    "source": "https://sketchfab.com/3d-models/lockheed-f-117-nighthawk-d2c544381f8444ad8628cd3bb0665e29",
+    "author": "karelkiers",
+    "authorUrl": "https://sketchfab.com/karelkiers",
+    "license": "CC-BY-4.0",
+    "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+    "triangles": 1376,
+    "aircraft": "Lockheed F-117 - Nighthawk",
+    "revision": "Unmodified Sketchfab GLB supplied by the user",
+    "turn": -90
+  },
+  "F-22": {
+    "file": "/models/vendor/f-22.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/Lockheed-Martin-FA-22A-Raptor/Models/Lockheed-Martin-FA-22A-Raptor.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 25637,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "Lockheed-Martin-FA-22A-Raptor"
+  },
+  "F-23": {
+    "file": "/models/vendor/f-23.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/YF-23/Models/YF23-006-008g11.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 4536,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "YF-23"
+  },
+  "MiG-29": {
+    "file": "/models/vendor/mig-29.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/Mig-29/Models/mesh_airframe.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 5053,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "Mig-29"
+  },
+  "J-20": {
+    "file": "/models/vendor/j-20-battlefront.glb",
+    "source": "https://eng.chinamil.com.cn/2025xb/M_251449/P_251468/16411359_4.html",
+    "author": "Battlefront project",
+    "license": "Project original asset",
+    "triangles": 24504,
+    "aircraft": "Chengdu J-20 Mighty Dragon",
+    "revision": "Original, non-scale display model with independently generated texture; photo used for appearance reference only"
+  },
+  "Mi-24": {
+    "file": "/models/vendor/mi-24.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/Mil-Mi-24/Models/mi24.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 57067,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "Mil-Mi-24"
+  },
+  "Su-25": {
+    "file": "/models/vendor/su-25.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/Su-25/Models/Su-25.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 63760,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "Su-25"
+  },
+  "Su-27": {
+    "file": "/models/vendor/su-27.glb",
+    "source": "https://raw.githubusercontent.com/yanes19/SU-27SK/925cb5317f3c66fa323a9e186e24d574e0b0881d/Models/Su-27.ac",
+    "license": "GPL-2.0-only",
+    "triangles": 9329,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "yanes19/SU-27SK"
+  },
+  "Su-33": {
+    "file": "/models/vendor/su-33.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/Sukhoi-Su-33/Models/su33.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 38430,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "Sukhoi-Su-33"
+  },
+  "UH-60": {
+    "file": "/models/vendor/uh-60.glb",
+    "source": "https://svn.code.sf.net/p/flightgear/fgaddon/trunk/Aircraft/UH-60/Models/uh60.ac",
+    "license": "GPL-2.0-or-later",
+    "triangles": 32280,
+    "revision": "exact source snapshot supplied in the archive",
+    "aircraft": "UH-60"
+  },
+  "Su-35": {
+    "file": "/models/vendor/su-35.glb",
+    "source": "https://motionmistry.pk/3d-models/",
+    "author": "andertan",
+    "license": "CC-BY-4.0",
+    "aircraft": "Sukhoi Su-35 Flanker-E",
+    "revision": "Motion Mistry redistribution",
+    "turn": -90
+  }
+}
