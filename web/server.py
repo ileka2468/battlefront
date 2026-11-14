@@ -247,6 +247,73 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
                     return
             self._static()
 
+    def do_POST(self):
+        if not self._authorized():
+            return
+        if WORKSPACE:
+            self._workspace_write()
+            return
+        with STATE_LOCK:
+            self._post_state()
+
+    def _workspace_token(self):
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None
+        return jar["bf_workspace"].value if "bf_workspace" in jar else None
+
+    def _workspace_health(self, head=False):
+        try:
+            healthy = workspace.check_health()
+        except (sqlite3.Error, ValueError, TypeError, KeyError):
+            healthy = False
+        body = b'{"status":"ok"}' if healthy else b'{"status":"unavailable"}'
+        self.send_response(200 if healthy else 503)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not head:
+            self.wfile.write(body)
+
+    def _workspace_sectors(self, replay=False):
+        # Projection is read-only and provenance-tagged. The planning map
+        # describes locations, not current ownership or available DCS funds.
+        with STATE_LOCK:
+            live = None if replay else telemetry_engine.read_live(time.time())
+        projection = live[1].get("campaign") if live else None
+        return (projection["sectors"], projection) if projection else (planning_sectors, None)
+
+    def _workspace_read(self):
+        session = workspace.session(self._workspace_token())
+        if self.path == "/api/state":
+            self._send_json(workspace.get_state(session))
+        elif self.path == "/api/upgrades":
+            self._send_json({})
+        else:
+            try:
+                replay = parse_qs(self.view_query, max_num_fields=4).get("replay") == ["1"]
+            except ValueError:
+                replay = False
+            sectors, projection = self._workspace_sectors(replay)
+            self._send_json(workspace.get_campaign(session, sectors, projection))
+
+    def _workspace_origin_ok(self):
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if fetch_site not in (None, "same-origin", "none"):
+            return False
+        origin = self.headers.get("Origin", "")
+        if WORKSPACE_ORIGIN:
+            return origin == WORKSPACE_ORIGIN
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        return (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and parsed.netloc == self.headers.get("Host") and origin == "http://" + parsed.netloc)
+
 
     def _send_json(self, data, status=200):
         self.send_response(status)
