@@ -765,10 +765,608 @@ ${Math.round(u.alt * 3.28084 / 100) * 100}ft · ${Math.round(u.speed_kts / 5) * 
     return from + (((to-from+180)%360+360)%360-180)*t;
   }
 
+  makePath(color, opacity, max) {
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute("position",new THREE.BufferAttribute(new Float32Array(max*3),3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute("color",new THREE.BufferAttribute(new Float32Array(max*3),3).setUsage(THREE.DynamicDrawUsage));
+    const line=new THREE.Line(geo,new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity,depthWrite:false}));
+    line.frustumCulled=false;
+    line.geometry.setDrawRange(0,0);
+    this.scene.add(line);
+    return {line,points:[],tint:new THREE.Color(color)};
+  }
+
+  pushPath(path, pos, reset, max) {
+    if(reset) path.points.length=0;
+    if(!path.points.length || path.points.at(-1).distanceToSquared(pos)>.0025) path.points.push(pos.clone());
+    while(path.points.length>max) path.points.shift();
+    const g=path.line.geometry,p=g.attributes.position,c=g.attributes.color;
+    path.points.forEach((v,i)=>{
+      const f=.2 + .8*(i+1)/path.points.length;
+      p.setXYZ(i,v.x,v.y,v.z);
+      c.setXYZ(i,path.tint.r*f,path.tint.g*f,path.tint.b*f);
+    });
+    g.setDrawRange(0,path.points.length);
+    p.needsUpdate=true; c.needsUpdate=true;
+  }
+
+  missileName(type) {
+    if(type==="AIM_120C") return "AIM‑120C";
+    if(type==="P_27PE") return "R‑27ER";
+    return type.replaceAll("_"," ");
+  }
+
+  makeContactMarker(kind, color) {
+    if (!this.contactTextures.has(kind)) {
+      const bitmap = document.createElement("canvas");
+      bitmap.width = bitmap.height = 64;
+      const ctx = bitmap.getContext("2d");
+      ctx.lineJoin="round";
+      ctx.lineCap="round";
+      ctx.beginPath();
+      if (kind === "missile") {
+        ctx.moveTo(32,9); ctx.lineTo(55,32); ctx.lineTo(32,55); ctx.lineTo(9,32); ctx.closePath();
+      } else {
+        ctx.moveTo(24,8); ctx.lineTo(8,8); ctx.lineTo(8,24);
+        ctx.moveTo(40,8); ctx.lineTo(56,8); ctx.lineTo(56,24);
+        ctx.moveTo(56,40); ctx.lineTo(56,56); ctx.lineTo(40,56);
+        ctx.moveTo(24,56); ctx.lineTo(8,56); ctx.lineTo(8,40);
+      }
+      ctx.strokeStyle="#081615"; ctx.lineWidth=9; ctx.stroke();
+      ctx.strokeStyle="#fff"; ctx.lineWidth=4.3; ctx.stroke();
+      this.contactTextures.set(kind,new THREE.CanvasTexture(bitmap));
+    }
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({map:this.contactTextures.get(kind),color,
+      opacity:.91, transparent:true, depthWrite:false, depthTest:false, fog:false}));
+    sprite.renderOrder=7;
+    sprite.visible=false;
+    this.scene.add(sprite);
+    return sprite;
+  }
+
+  updateMissiles(missiles, reset=false, liveTime=null) {
+    const active=new Set();
+    for(const m of missiles){
+      active.add(m.id);
+      const p=this.dcsToThree(m.x,m.z,m.alt);
+      let record=this.missileMeshes.get(m.id);
+      if(!record){
+        const key=m.type+":"+m.side;
+        if(!this.missileCache.has(key)) this.missileCache.set(key,this.normalizedTemplate(BattlefrontAirframes.missile(m.type,m.side)));
+        const mesh=this.missileCache.get(key).clone(true);
+        mesh.userData.missileId=m.id;
+        this.scene.add(mesh);
+        const dot=this.makeContactMarker("missile",0xffdc90);
+        dot.userData.missileId=m.id;
+        const label=this.createTacticalTextSprite(this.missileName(m.type),"#ffe5a7",24);
+        label.userData.missileId=m.id;
+        this.scene.add(label);
+        const v=new THREE.Vector3(p.x,p.y,p.z);
+        record={mesh,dot,label,path:this.makePath(m.side===1?0xff9f59:0xffe18c,.97,36),currentPos:v,startPos:v.clone(),targetPos:v.clone(),heading:m.heading,pitch:m.pitch??0};
+        this.missileMeshes.set(m.id,record);
+      }
+      record.data=m;
+      record.startPos.copy(record.currentPos);
+      record.targetPos.set(p.x,p.y,p.z);
+      if(reset) record.startPos.copy(record.targetPos);
+      record.heading=m.heading; record.pitch=m.pitch??0;
+      if (liveTime!=null) addLivePose(record,liveTime,p.x,p.y,p.z,m.heading,m.pitch??0,0,reset);
+      if(Array.isArray(m.tail) && m.tail.length){
+        record.path.points=m.tail.map(p=>this.dcsToThree(...p)).map(p=>new THREE.Vector3(p.x,p.y,p.z));
+      }
+      this.pushPath(record.path,record.targetPos,reset && !m.tail?.length,32);
+    }
+    for(const [id,r] of this.missileMeshes){
+      if(active.has(id)) continue;
+      for(const item of [r.mesh,r.dot,r.label,r.path.line]) this.scene.remove(item);
+      r.dot.material.dispose(); // the diamond map is shared across missiles
+      for(const item of [r.label,r.path.line]){
+        item.geometry?.dispose(); item.material.map?.dispose(); item.material.dispose();
+      }
+      this.missileMeshes.delete(id);
+      if(this.trackedMissileId===id) this.closeTargetHUD();
+    }
+    const tray=document.getElementById("bf-missile-list");
+    if(!tray) return;
+    const key=JSON.stringify(missiles.map(m=>m.id).sort());
+    if(key===this.missileKey) return;
+    this.missileKey=key;
+    tray.replaceChildren();
+    for(const [id,r] of this.missileMeshes){
+      const b=document.createElement("button");
+      b.type="button"; b.textContent=this.missileName(r.data.type)+" · "+id.replace(/^M-/,"#");
+      b.addEventListener("click",()=>this.trackMissile(id));
+      tray.append(b);
+    }
+  }
+
+  trackMissile(id) {
+    const r=this.missileMeshes.get(id);
+    if(!r || !this.controls) return;
+    this.closeTargetHUD();
+    this.trackedMissileId=id;
+    this.controls.enablePan=false;
+    this.frameMissileChase(r);
+    const hud=document.getElementById("tacviewTargetHud");
+    if(!hud) return;
+    hud.replaceChildren();
+    for (const [tag,cls,value] of [["strong","",this.missileName(r.data.type)],["div","hud-label","TRACKING MISSILE · "+id],
+      ["div","hud-value", ""],["div","hud-sub","Drag to orbit · Scroll or pinch to zoom"]]) {
+      const el=document.createElement(tag); el.className=cls;el.textContent=value;hud.append(el);
+    }
+    const actions=document.createElement("div"); actions.className="target-hud-actions";
+    const wide=document.createElement("button");
+    wide.type="button"; wide.textContent="Wide chase"; wide.className="btn btn-sm btn-primary";
+    wide.onclick=()=>this.frameMissileChase(r,true);
+    const stop=document.createElement("button");
+    stop.type="button"; stop.textContent="Stop tracking";stop.className="btn btn-sm btn-outline";
+    stop.onclick=()=>this.setCameraPreset("engagement");
+    actions.append(wide,stop); hud.append(actions);hud.style.display="block";
+  }
+
+  frameMissileChase(record, wide=false) {
+    const a=THREE.MathUtils.degToRad(record.heading);
+    const behind=wide?20:2.45, side=wide?12:1.45;
+    this.controls.target.copy(record.currentPos);
+    this.camera.position.copy(record.currentPos).add(new THREE.Vector3(
+      -Math.sin(a)*behind+Math.cos(a)*side,wide?10:1.05,Math.cos(a)*behind+Math.sin(a)*side));
+    this.controls.update();
+  }
+
+  trackNextMissile() {
+    const ids=[...this.missileMeshes.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+    if(ids.length) this.trackMissile(ids[(ids.indexOf(this.trackedMissileId)+1)%ids.length]);
+  }
+
+  createTacticalTextSprite(text, color, fontSize) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "rgba(7, 11, 18, 0.85)";
+    if (ctx.roundRect) {
+      ctx.roundRect(10, 8, 236, 48, 6);
+    } else {
+      ctx.beginPath();
+      ctx.rect(10, 8, 236, 48);
+    }
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = `bold ${fontSize || 12}px 'JetBrains Mono', monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const lines = text.split("\n");
+    if (lines.length > 1) {
+      ctx.fillText(lines[0], 128, 24);
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = `14px 'JetBrains Mono', monospace`;
+      ctx.fillText(lines[1], 128, 42);
+    } else {
+      ctx.fillText(text, 128, 32);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.scale.set(24, 6, 1);
+    sprite.userData = { canvas, ctx, color, fontSize };
+    return sprite;
+  }
+
+  updateTextSprite(sprite, text) {
+    if (!sprite || !sprite.userData || !sprite.userData.ctx) return;
+    const { canvas, ctx, color, fontSize } = sprite.userData;
+    ctx.clearRect(0, 0, 256, 64);
+
+    ctx.fillStyle = "rgba(7, 11, 18, 0.85)";
+    if (ctx.roundRect) {
+      ctx.roundRect(10, 8, 236, 48, 6);
+    } else {
+      ctx.beginPath();
+      ctx.rect(10, 8, 236, 48);
+    }
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = `bold ${fontSize || 12}px 'JetBrains Mono', monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const lines = text.split("\n");
+    if (lines.length > 1) {
+      ctx.fillText(lines[0], 128, 24);
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = `14px 'JetBrains Mono', monospace`;
+      ctx.fillText(lines[1], 128, 42);
+    } else {
+      ctx.fillText(text, 128, 32);
+    }
+    sprite.material.map.needsUpdate = true;
+  }
+
+  onSceneClick(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    this.camera.updateMatrixWorld();
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const records = [...this.aircraftUnits.values(), ...this.missileMeshes.values()];
+    const pickables = records.flatMap(x => [x.mesh, x.label]).filter(Boolean);
+    const intersects = this.raycaster.intersectObjects(pickables.filter(o=>o.visible), true);
+
+    const follow = object => {
+      for(let target=object; target && target!==this.scene; target=target.parent){
+        const {unitId,missileId}=target.userData;
+        if (this.aircraftUnits.has(unitId)) { this.trackCamera(unitId); return true; }
+        if (this.missileMeshes.has(missileId)) { this.trackMissile(missileId); return true; }
+      }
+      return false;
+    };
+    for (const hit of intersects) if(follow(hit.object)) return;
+
+    // Use the nearest projected center when the pointer is on an open corner
+    // of a marker or just misses a wing. Actual mesh/label hits still win.
+    const nearest=this.nearestContact(event.clientX,event.clientY,rect,event.pointerType==="touch");
+    if(nearest) follow(nearest);
+  }
+
+  nearestContact(x, y, rect, touch=false) {
+    if(!rect.width || !rect.height) return null;
+    let nearest=null, distance=Infinity, depth=Infinity;
+    for(const {mesh,marker,dot} of [...this.aircraftUnits.values(),...this.missileMeshes.values()]){
+      if(!mesh.visible) continue;
+      const projected=this.pickPoint.copy(mesh.position).project(this.camera);
+      if(Math.abs(projected.x)>1 || Math.abs(projected.y)>1 || projected.z<-1 || projected.z>1) continue;
+      const dx=rect.left+(projected.x+1)*rect.width/2-x;
+      const dy=rect.top+(1-projected.y)*rect.height/2-y;
+      const squared=dx*dx+dy*dy;
+      // Brackets must be hittable all the way out to their corners; reserve
+      // less empty space around small missile diamonds and unmarked meshes.
+      const radius=marker?.visible?(touch?30:25):dot?.visible?(touch?24:16):(touch?24:14);
+      if(squared>radius**2) continue;
+      if(squared<distance || (squared===distance && projected.z<depth)){
+        nearest=mesh; distance=squared; depth=projected.z;
+      }
+    }
+    return nearest;
+  }
+
+  selectUnit(unitId) {
+    this.selectedUnitId = unitId;
+    this.trackedMissileId = null;
+    const record = this.aircraftUnits.get(unitId);
+    if (!record) return;
+
+    this.renderTargetHUD(record.data);
+  }
+
+  renderTargetHUD(unit) {
+    const hud = document.getElementById("tacviewTargetHud");
+    if (!hud) return;
+
+    hud.style.display = "block";
+    const teamClass = unit.side === 2 ? "badge-blue" : "badge-red";
+    const teamName = unit.side === 2 ? "BLUFOR" : "REDFOR";
+    const altFt = Math.round(unit.alt * 3.28084);
+    const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c =>
+      ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const record = this.aircraftUnits.get(unit.id);
+    const kind = record?.mesh.userData.loading ? "LOADING AIRFRAME" :
+      record?.mesh.userData.representative ? record.mesh.userData.displayName : "GENERIC CONTACT";
+    const displaced = record?.displayPos.distanceTo(record.currentPos) > .22;
+    const hint = (record?.mesh.userData.downloaded ? " · IMPORTED MESH" :
+      record?.mesh.userData.representative ? " · REPRESENTATIVE MESH" : "") + (displaced ? " · GLYPH OFFSET" : "");
+    const flightState = unit.on_ground ? "ON GROUND" : "AIRBORNE";
+    const weaponHTML = unit.weapons?.length ? unit.weapons.map(w => `<span class="weapon-tag">${esc(w)}</span>`).join("")
+      : '<span class="weapon-tag">Not reported by this feed</span>';
+
+    hud.innerHTML = `
+      <div class="target-hud-header">
+        <span class="${teamClass}">${teamName}</span>
+        <strong>${esc(unit.callsign)}</strong>
+        <span class="target-type">${esc(unit.type)}</span>
+        <button class="btn-close-hud" aria-label="Close aircraft details" data-close-hud>&times;</button>
+      </div>
+      <div class="target-hud-grid">
+        <div class="hud-stat-cell">
+          <span class="hud-label">ALTITUDE</span>
+          <span class="hud-value">${altFt.toLocaleString()} FT</span>
+          <span class="hud-sub">MSL · DCS</span>
+        </div>
+        <div class="hud-stat-cell">
+          <span class="hud-label">VELOCITY</span>
+          <span class="hud-value">${Math.round(unit.speed_kts)} KTS</span>
+          <span class="hud-sub">WORLD SPEED</span>
+        </div>
+        <div class="hud-stat-cell">
+          <span class="hud-label">HEADING</span>
+          <span class="hud-value">${Math.round(unit.heading)}&deg;</span>
+          <span class="hud-sub">PITCH ${Math.round(unit.pitch || 0)}&deg;</span>
+        </div>
+        <div class="hud-stat-cell">
+          <span class="hud-label">MISSION ROLE</span>
+          <span class="hud-value" style="color: #38bdf8;">${esc(unit.role || flightState)}</span>
+          <span class="hud-sub">${esc(unit.status || kind)}${hint}</span>
+        </div>
+      </div>
+      <div class="target-hud-loadout">
+        <span class="hud-label">ORDNANCE LOADOUT</span>
+        <div class="loadout-tags">
+          ${weaponHTML}
+        </div>
+      </div>
+      <div class="target-hud-actions">
+        <button class="btn btn-sm btn-primary" data-chase>
+          Chase camera
+        </button>
+        <button class="btn btn-sm btn-outline" data-closeup>Close-up</button>
+        <button class="btn btn-sm btn-outline" data-track-missile>
+          Track active missile
+        </button>
+      </div>
+    `;
+    hud.querySelector("[data-chase]").onclick = () => this.trackCamera(unit.id);
+    hud.querySelector("[data-closeup]").onclick = () => this.trackCamera(unit.id,true);
+    hud.querySelector("[data-close-hud]").onclick = () => this.closeTargetHUD();
+    hud.querySelector("[data-track-missile]").onclick = () => this.trackNextMissile();
+  }
+
+  closeTargetHUD() {
+    const hud = document.getElementById("tacviewTargetHud");
+    if (hud) hud.style.display = "none";
+    this.selectedUnitId = null;
+    this.trackedUnitId = null;
+    this.trackedMissileId = null;
+    if(this.controls) this.controls.enablePan=true;
+  }
+
+  trackCamera(unitId, close=false) {
+    const record = this.aircraftUnits.get(unitId);
+    if (!record || !this.controls) return;
+    this.selectUnit(unitId);
+    this.trackedUnitId = unitId;
+    this.trackedMissileId = null;
+    this.controls.enablePan=false;
+    const angle = THREE.MathUtils.degToRad(record.currentHeading);
+    this.controls.target.copy(record.displayPos);
+    const behind=close?2.8:6.1, off=close?1.55:2.2;
+    this.camera.position.copy(record.displayPos).add(new THREE.Vector3(
+      -Math.sin(angle)*behind+Math.cos(angle)*off, close?1.45:2.6, Math.cos(angle)*behind+Math.sin(angle)*off));
+    this.controls.update();
+  }
+
+  placeEngagement(side) {
+    const records=[...this.aircraftUnits.values()].filter(r=>!side||r.data.side===side);
+    if(!records.length) return;
+    // Fit a local concentration of contacts instead of averaging unrelated
+    // groups across the map. Theater and Plan view still show the whole area.
+    const airborne=records.filter(r=>!r.data.on_ground);
+    const pool=airborne.length>=4?airborne:records;
+    const aspect=Math.max(.55,this.camera.aspect);
+    const radius=THREE.MathUtils.clamp(32*Math.sqrt(aspect),23,48);
+    let focus=pool, best=-Infinity;
+    for(const r of pool){
+      const neighborhood=pool.filter(other=>
+        (r.currentPos.x-other.currentPos.x)**2+(r.currentPos.z-other.currentPos.z)**2<=radius**2);
+      const mix=new Set(neighborhood.map(x=>x.data.side)).size;
+      const compactness=neighborhood.reduce((n,x)=>n+Math.hypot(x.currentPos.x-r.currentPos.x,x.currentPos.z-r.currentPos.z),0)/neighborhood.length;
+      const score=neighborhood.length + (mix>1?.35:0) - .24*compactness/radius;
+      if(score>best){best=score; focus=neighborhood;}
+    }
+    const bounds=new THREE.Box3().setFromPoints(focus.map(r=>r.currentPos));
+    const center=bounds.getCenter(new THREE.Vector3());
+    const cameraOffset=new THREE.Vector3(-.50,.65,.71).normalize();
+    const right=new THREE.Vector3().crossVectors(this.camera.up,cameraOffset).normalize();
+    const frameUp=new THREE.Vector3().crossVectors(cameraOffset,right);
+    const tanHalf=Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5));
+    const delta=new THREE.Vector3();
+    let fit=0;
+    for(const r of focus){
+      delta.copy(r.currentPos).sub(center);
+      fit=Math.max(fit, delta.dot(cameraOffset)+Math.max(
+        (Math.abs(delta.dot(right))+2.3)/(tanHalf*aspect*.82),
+        (Math.abs(delta.dot(frameUp))+2.3)/(tanHalf*.82)));
+    }
+    const distance=THREE.MathUtils.clamp(fit, 27, aspect<1?106:88);
+    this.controls.target.copy(center);
+    this.camera.position.copy(center).addScaledVector(cameraOffset,distance);
+    this.controls.update();
+  }
+
+  setCameraPreset(preset) {
+    if (!this.controls) return;
+    this.cameraPreset=preset;
+    document.querySelectorAll(".cam-preset-btn").forEach(btn => {
+      const active = btn.dataset.cameraPreset ? btn.dataset.cameraPreset===preset :
+        Boolean(btn.getAttribute("onclick")?.includes(`'${preset}'`));
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", String(Boolean(active)));
+    });
+    this.closeTargetHUD();
+
+    if(preset === "engagement") {
+      this.placeEngagement();
+    } else if (preset === "theater") {
+      this.camera.position.set(-115, 350, 310);
+      this.controls.target.set(0, 15, 0);
+    } else if (preset === "frontline") {
+      this.camera.position.set(-20, 75, 85);
+      this.controls.target.set(-20, 20, 0);
+    } else if (preset === "blufor") {
+      this.placeEngagement(2);
+    } else if (preset === "redfor") {
+      this.placeEngagement(1);
+    } else if (preset === "topdown") {
+      this.camera.position.set(0, 595, 1);
+      this.controls.target.set(0, 0, 0);
+    }
+  }
+
+  onKeyDown(e) {
+    if (!e.target?.matches?.("input, textarea") && e.key.toLowerCase() === "m") this.trackNextMissile();
+  }
 
   onResize() {
-    if (!this.renderer || !this.camera || !this.container) return;
-    this.camera.aspect = (this.container.clientWidth || 900) / (this.container.clientHeight || 550);
+    if (!this.container || !this.renderer || !this.camera) return;
+    const width = this.container.clientWidth;
+    if (!width) return; // Airspace stays mounted when another React tab is visible.
+    const height = this.container.clientHeight || 550;
+    this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  }
+
+  followCameraAnchor(anchor, dt) {
+    if (!this.controls) return;
+    // Translate the orbit rig as a unit. Rebuilding the camera from heading on
+    // every frame snaps it back and undoes the user's orbit/dolly input.
+    this.followDelta.copy(anchor).sub(this.controls.target)
+      .multiplyScalar(1 - Math.exp(-Math.min(dt,.15)*14));
+    this.controls.target.add(this.followDelta);
+    this.camera.position.add(this.followDelta);
+  }
+
+  viewDepth(point) {
+    return Math.max(2,-this.depthProbe.copy(point).applyMatrix4(this.camera.matrixWorldInverse).z);
+  }
+
+  // ============================================================================
+  // 60 FPS ANIMATION LOOP WITH A JITTER-BUFFERED LIVE SOURCE CLOCK
+  // ============================================================================
+
+  animate() {
+    requestAnimationFrame(() => this.animate());
+
+    if(!this.container.offsetParent || document.hidden) return;
+    const dt=this.clock.getDelta();
+    this.terrain.update(this.clock.elapsedTime);
+    const now=performance.now()/1000;
+    const t = Math.max(0, Math.min(1, (now-this.lastSnapshotAt)/this.snapshotInterval));
+    const playhead=this.telemetryMode==="live" ? this.liveClock.advance(now) : null;
+    const occupied = [];
+    const d=this.controls?this.camera.position.distanceTo(this.controls.target):75;
+    this.camera.updateMatrixWorld();
+    const focalPx=Math.max(1,this.container.clientHeight)*.5*this.camera.zoom /
+      Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5));
+    const targetRadiusPx=this.container.clientWidth<550?14:16;
+    const visibleLabels=this.showAllLabels || this.aircraftUnits.size<=8;
+    const missileFocus=this.missileMeshes.get(this.trackedMissileId);
+    const missileContextRadius=d>10 ? THREE.MathUtils.clamp(d*.85,15,60) : 0;
+    for (const [id, record] of this.sortedAircraft || []) {
+      const pos=record.currentPos;
+      if (!sampleLivePose(record,playhead,pos,!record.data.on_ground)) {
+        pos.lerpVectors(record.startPos,record.targetPos,t);
+        record.currentHeading = TacviewVisualizer.mixAngle(record.startHeading, record.targetHeading, t);
+        record.currentPitch = THREE.MathUtils.lerp(record.startPitch, record.targetPitch, t);
+        record.currentRoll = TacviewVisualizer.mixAngle(record.startRoll, record.targetRoll, t);
+      }
+
+      const depth=this.viewDepth(pos);
+      const scale=THREE.MathUtils.clamp(Math.max(d*.017,depth*targetRadiusPx/focalPx),.53,5.6);
+      const render = TacviewVisualizer.placeGlyph(pos,occupied,record.displayPos,Math.max(1.2,scale*2.35),scale);
+      render.glyphRadius=scale;
+      occupied.push(render);
+      const ground=this.getElevation(pos.x,pos.z);
+      render.y=Math.max(render.y,this.getElevation(render.x,render.z)+scale+.10);
+      record.mesh.position.copy(render);
+      record.mesh.scale.setScalar(scale);
+      record.marker.position.copy(render);
+      const markerSize=THREE.MathUtils.clamp(this.viewDepth(render)*39/focalPx,.55,74);
+      record.marker.scale.setScalar(markerSize);
+      record.marker.visible=depth>19 && id!==this.trackedUnitId;
+      record.path.line.visible=d<220;
+      const attr=record.path.line.geometry.attributes.position;
+      if(record.path.points.length>1){
+        attr.setXYZ(record.path.points.length-1,pos.x,pos.y,pos.z); attr.needsUpdate=true;
+      }
+      record.mesh.rotation.set(-THREE.MathUtils.degToRad(record.currentPitch),
+        THREE.MathUtils.degToRad(180 - record.currentHeading), THREE.MathUtils.degToRad(record.currentRoll), "YXZ");
+      const line = record.line.geometry.attributes.position;
+      const selected=id===this.selectedUnitId;
+      line.setXYZ(0, render.x, render.y, render.z);
+      line.setXYZ(1, pos.x, Math.max(pos.y, ground + .18), pos.z);
+      line.setXYZ(2, pos.x, selected?ground+.18:Math.max(pos.y,ground+.18), pos.z);
+      line.needsUpdate = true;
+      record.shadow.position.set(pos.x, ground + .18, pos.z);
+      const labelScale=THREE.MathUtils.clamp(this.camera.position.distanceTo(render)*.17,1.65,18);
+      const inMissileContext=missileFocus && missileContextRadius>0 &&
+        pos.distanceToSquared(missileFocus.currentPos)<missileContextRadius**2;
+      record.label.visible=Boolean(visibleLabels || id===this.selectedUnitId || inMissileContext);
+      if(record.label.visible && !record.lastLabel){
+        this.updateTextSprite(record.label,record.data.callsign);
+        record.lastLabel=record.data.callsign;
+      }
+      record.label.scale.set(labelScale,labelScale*.25,1);
+      record.label.position.set(render.x, render.y+scale+labelScale*.13,render.z);
+      record.line.visible=selected || (d<34 && Math.hypot(render.x-pos.x,render.z-pos.z)>.23);
+      record.shadow.visible=selected;
+    }
+    for (const msl of this.missileMeshes.values()) {
+      if (!sampleLivePose(msl,playhead,msl.currentPos)) {
+        msl.currentPos.lerpVectors(msl.startPos,msl.targetPos,t);
+        msl.currentHeading=msl.heading;
+        msl.currentPitch=msl.pitch;
+      }
+      const rad = THREE.MathUtils.degToRad(180-msl.currentHeading);
+      msl.mesh.position.copy(msl.currentPos);
+      msl.mesh.rotation.set(-THREE.MathUtils.degToRad(msl.currentPitch),rad,0,"YXZ");
+      const dist=this.camera.position.distanceTo(msl.currentPos);
+      msl.mesh.scale.setScalar(THREE.MathUtils.clamp(dist*.019,.23,2.1));
+      msl.dot.position.copy(msl.currentPos);
+      msl.dot.scale.setScalar(THREE.MathUtils.clamp(this.viewDepth(msl.currentPos)*23/focalPx,.20,48));
+      msl.dot.visible=dist>13 && msl.data.id!==this.trackedMissileId;
+      const labelScale=THREE.MathUtils.clamp(dist*.102,1.35,8.6);
+      msl.label.scale.set(labelScale,labelScale*.25,1);
+      msl.label.position.copy(msl.currentPos); msl.label.position.y+=labelScale*.22;
+      msl.label.visible=msl.data.id===this.trackedMissileId || (!missileFocus && d<125 && (this.missileMeshes.size<=3 || dist<70));
+      const att=msl.path.line.geometry.attributes.position;
+      if(msl.path.points.length>1){
+        att.setXYZ(msl.path.points.length-1,msl.currentPos.x,msl.currentPos.y,msl.currentPos.z); att.needsUpdate=true;
+      }
+      if(msl.data.id===this.trackedMissileId){
+        const read=document.querySelector("#tacviewTargetHud .hud-value");
+        if(read) read.textContent=`${Math.round(msl.data.speed_kts).toLocaleString()} kt · ${Math.round(msl.data.alt*3.28084).toLocaleString()} ft`;
+      }
+    }
+    for (const label of this.sectorMarkers) {
+      label.visible=!this.trackedUnitId && d>93 && this.camera.position.distanceToSquared(label.position)<160**2;
+    }
+
+    // Camera Chase / Tracking
+    const tracked = this.aircraftUnits.get(this.trackedUnitId);
+    if (tracked) this.followCameraAnchor(tracked.displayPos,dt);
+    else if (missileFocus) this.followCameraAnchor(missileFocus.currentPos,dt);
+
+    if (this.controls) {
+      this.controls.update();
+    }
+
+    this.sky.position.copy(this.camera.position);
+    this.renderer.render(this.scene, this.camera);
   }
 }
+
+// Global initialization hook
+if (typeof module !== "undefined") {
+  module.exports = TacviewVisualizer;
+  module.exports.LiveSnapshotClock = LiveSnapshotClock;
+  module.exports.addLivePose = addLivePose;
+  module.exports.sampleLivePose = sampleLivePose;
+}
+if (typeof window !== "undefined") window.initTacview = function(containerId) {
+  if (!window.tacview) {
+    window.tacview = new TacviewVisualizer(containerId);
+  }
+  return window.tacview;
+};
