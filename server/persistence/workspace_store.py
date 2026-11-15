@@ -199,3 +199,202 @@ class WorkspaceStore:
         with self.connect(write=True) as db:
             db.execute("DELETE FROM workspace_sessions WHERE hash=?", (self.token_hash(token),))
 
+    def get_state(self, session):
+        with self.connect() as db:
+            state = self._read(db)
+        actor, side = (session["actor"], session["side"]) if session else (None, None)
+        players = {key: (row if key == actor else {k: row[k] for k in ("callsign", "side", "stats")})
+                   for key, row in state["players"].items()}
+        listings = [row for row in state["listings"].values() if row["side"] == side]
+        # Display names can change; ownership continues to use immutable actor keys.
+        for row in listings:
+            row["seller_callsign"] = players[row["seller"]]["callsign"]
+        trades = [row for row in state["trades"] if row["side"] == side]
+        return {"workspace": {"mode": "production", "player_id": actor, "authenticated": actor is not None,
+                              "csrf": session["csrf"] if session else None,
+                              "can_command": session["can_command"] if session else False},
+                "currency_name": "Companion Merits", "currency_symbol": "CM", "munition_catalog": self.catalog,
+                "players": players, "marketplace": listings, "trade_history": trades}
+
+    def get_campaign(self, session, sectors, projection):
+        with self.connect() as db:
+            state = self._read(db)
+        side = str(session["side"]) if session else None
+        commanders = state["commanders"]
+        return {
+            "operations": {side: state["operations"][side]} if side in state["operations"] else {},
+            "coalitions": {side: {"human_commander": commanders.get(side)}} if side else {},
+            "previous_plans": [op for op in state["previous_plans"] if str(op["side"]) == side],
+            "sectors": sectors,
+            "sector_source": "live_dcs" if projection else "planning_map",
+            "live_snapshot": projection,
+            "campaign_scope": "persistent_companion",
+        }
+
+    def mutate(self, path, session, body, sectors):
+        actor, side = session["actor"], session["side"]
+        if "side" in body and (type(body["side"]) is not int or body["side"] != side):
+            raise WorkspaceError("This operation is only available to your assigned coalition.", 403)
+        if any(k in body and body[k] not in (None, "", actor) for k in ("player_id", "seller_id", "buyer_id")):
+            raise WorkspaceError("This action must be made by the signed-in pilot.", 403)
+        # Player, inventory, listing, money and audit entry commit together,
+        # including when several server threads/processes share the durable file.
+        with self.connect(write=True) as db:
+            if not db.execute("SELECT 1 FROM workspace_sessions WHERE hash=? AND expires>?",
+                              (session["hash"], int(time.time()))).fetchone():
+                raise WorkspaceError("Sign in to change the workspace.", 401)
+            state = self._read(db)
+            player = state["players"].get(actor)
+            if not player or player["side"] != side:
+                raise WorkspaceError("Pilot account unavailable.", 403)
+            data, audit = self._apply(path, state, actor, side, player, session["can_command"], body, sectors)
+            self._save(db, state)
+            self._record(db, actor, path.rsplit("/", 1)[1], audit)
+        return {"success": True, **data}
+
+    def _apply(self, path, state, actor, side, player, can_command, body, sectors):
+        if path == "/api/player/set_callsign":
+            name = trim_text(body.get("callsign"), "callsign", 24)
+            if not CALLSIGN.fullmatch(name):
+                raise WorkspaceError("Use letters, digits, spaces, underscores or hyphens for a callsign.")
+            rivals = [p["callsign"].casefold() for key, p in state["players"].items() if key != actor]
+            rivals.extend(a["callsign"].casefold() for key, a in self.by_id.items() if key != actor)
+            if name.casefold() in rivals:
+                raise WorkspaceError("That callsign is already in use.", 409)
+            before = player["callsign"]
+            player["callsign"] = name
+            return {"player_id": actor, "player": player, "message": "Callsign updated."}, {"before": before, "after": name}
+        inventory = player["inventory"]
+        listings = state["listings"]
+        if path in ("/api/requisition", "/api/marketplace/list", "/api/armory/mount"):
+            item = trim_text(body.get("munition"), "item")
+            spec = self.catalog.get(item)
+            if not spec or spec.get("coalition") != ("REDFOR" if side == 1 else "BLUFOR"):
+                raise WorkspaceError("Item unavailable for your coalition.", 403)
+            if path == "/api/requisition":
+                cost = integer(spec.get("cost_points"), "catalog price", 1, 10000)
+                before = player["points"]
+                if before < cost:
+                    raise WorkspaceError(f"Insufficient Companion Merits: need {cost} CM.", 409)
+                if inventory.get(item, 0) >= 1000:
+                    raise WorkspaceError("Item storage limit reached.", 409)
+                player["points"] -= cost
+                inventory[item] = inventory.get(item, 0) + 1
+                return {"message": "Item added to companion armory.", "new_balance": player["points"]}, {
+                    "item": item, "quantity": 1, "cost": cost, "before": before, "after": player["points"]}
+            if path == "/api/armory/mount":
+                if inventory.get(item, 0) < 1:
+                    raise WorkspaceError("You do not have this item in your companion armory.", 409)
+                player["planned_loadout"][item] = 1
+                return {"message": "Added to planned loadout. No DCS aircraft was changed."}, {"item": item}
+            quantity = integer(body.get("quantity"), "quantity", 1, 50)
+            price = integer(body.get("price_points"), "total asking price", 1, 10000)
+            if inventory.get(item, 0) < quantity:
+                raise WorkspaceError("Not enough stock for this listing.", 409)
+            if sum(row["seller"] == actor for row in listings.values()) >= 20:
+                raise WorkspaceError("Active listing limit reached.", 409)
+            inventory[item] -= quantity
+            if inventory[item] == 0:
+                del inventory[item]
+                player["planned_loadout"].pop(item, None)
+            listing_id = "listing_" + secrets.token_hex(12)
+            listing = {"id": listing_id, "seller": actor, "seller_callsign": player["callsign"], "side": side,
+                       "item": item, "quantity": quantity, "price_points": price, "created_at": iso_now(), "status": "active"}
+            listings[listing_id] = listing
+            return {"message": "Listing posted; stock is held in escrow.", "listing": listing}, listing
+        if path in ("/api/marketplace/buy", "/api/marketplace/cancel"):
+            listing_id = trim_text(body.get("listing_id"), "listing")
+            listing = listings.get(listing_id)
+            if not listing or listing["side"] != side:
+                raise WorkspaceError("Listing unavailable or already sold.", 404)
+            item, quantity, price = listing["item"], listing["quantity"], listing["price_points"]
+            if path.endswith("/cancel"):
+                if listing["seller"] != actor:
+                    raise WorkspaceError("Only the listing owner can cancel it.", 403)
+                inventory[item] = inventory.get(item, 0) + quantity
+                del listings[listing_id]
+                return {"message": "Listing cancelled; stock returned to your inventory."}, listing
+            if listing["seller"] == actor:
+                raise WorkspaceError("You cannot buy your own listing.", 409)
+            if player["points"] < price:
+                raise WorkspaceError(f"Insufficient Companion Merits: need {price} CM.", 409)
+            if inventory.get(item, 0) + quantity > 1000:
+                raise WorkspaceError("Item storage limit reached.", 409)
+            seller = state["players"][listing["seller"]]
+            buyer_before, seller_before = player["points"], seller["points"]
+            player["points"] -= price
+            seller["points"] += price
+            inventory[item] = inventory.get(item, 0) + quantity
+            del listings[listing_id]
+            trade = {"id": listing_id, "side": side, "buyer": actor, "seller": listing["seller"],
+                     "item": item, "quantity": quantity, "price_points": price, "timestamp": iso_now()}
+            state["trades"] = [trade, *state["trades"][:249]]
+            audit = {**trade, "buyer_before": buyer_before, "buyer_after": player["points"],
+                     "seller_before": seller_before, "seller_after": seller["points"]}
+            return {"message": "Trade settled.", "trade": trade, "new_balance": player["points"]}, audit
+        return self._operation(path, state, actor, side, player, can_command, body, sectors)
+
+    def _operation(self, path, state, actor, side, player, can_command, body, sectors):
+        side_key = str(side)
+        ops, commanders = state["operations"], state["commanders"]
+        op = ops.get(side_key)
+        action = path.rsplit("/", 1)[1]
+        if action == "command":
+            if not can_command:
+                raise WorkspaceError("Only assigned coalition commanders can take command.", 403)
+            current = commanders.get(side_key)
+            if current == actor:
+                del commanders[side_key]
+                return {"message": "Coalition command relinquished."}, {"side": side, "commander": None}
+            if current in self.by_id:
+                raise WorkspaceError("Your coalition already has a commander.", 409)
+            commanders[side_key] = actor
+            return {"message": "Coalition command assumed."}, {"side": side, "commander": actor}
+        if action == "propose":
+            target = trim_text(body.get("target_sector"), "target sector")
+            if not any(row.get("name") == target and row.get("side") in (1, 2) and row["side"] != side for row in sectors):
+                raise WorkspaceError("Choose an enemy sector from the campaign map.")
+            if op and op["status"] == "PLANNED":
+                raise WorkspaceError("This coalition has an open plan already.", 409)
+            if op:
+                state["previous_plans"] = [op, *state["previous_plans"][:49]]
+            roles = [("Lead", "Flight lead"), ("Escort", "Escort wingman"),
+                     ("Strike", "Strike flight"), ("Support", "Mission support")]
+            op = {"id": "plan_" + secrets.token_hex(8), "name": f"Operation {target}", "side": side,
+                  "status": "PLANNED", "target_sector": target, "target_quadrant": "Caucasus",
+                  "coordinator": player["callsign"], "frequency": "Coordinate in DCS",
+                  "created_at": iso_now(), "objective_desc": "Coalition briefing only. This plan does not launch a DCS flight.",
+                  "slots": [{"role": key, "role_title": title, "airframes": "Confirm in DCS", "pilot": None}
+                            for key, title in roles]}
+            ops[side_key] = op
+            return {"message": "Coalition flight plan proposed.", "operation": op}, {"plan": op["id"], "target": target}
+        if not op:
+            raise WorkspaceError("Your coalition has no current flight plan.", 404)
+        if op["status"] != "PLANNED":
+            raise WorkspaceError("This flight plan has already been scheduled.", 409)
+        if action == "join":
+            index = integer(body.get("slot_index"), "roster slot", 0, len(op["slots"]) - 1)
+            slot = op["slots"][index]
+            if slot["pilot"] and slot["pilot"] != actor:
+                raise WorkspaceError("That slot is already assigned.", 409)
+            if any(s["pilot"] == actor and s is not slot for s in op["slots"]):
+                raise WorkspaceError("Leave your current slot before choosing another.", 409)
+            slot["pilot"] = actor
+            slot["pilot_callsign"] = player["callsign"]
+            return {"message": "Roster slot reserved."}, {"plan": op["id"], "slot": index}
+        if action == "leave":
+            for index, slot in enumerate(op["slots"]):
+                if slot["pilot"] == actor:
+                    slot["pilot"] = None
+                    slot.pop("pilot_callsign", None)
+                    return {"message": "Roster slot released."}, {"plan": op["id"], "slot": index}
+            raise WorkspaceError("You do not have a slot in this plan.", 409)
+        if action == "launch":
+            if not can_command or commanders.get(side_key) != actor:
+                raise WorkspaceError("The current coalition commander must schedule this plan.", 403)
+            if not any(slot["pilot"] for slot in op["slots"]):
+                raise WorkspaceError("Reserve a roster slot first.", 409)
+            op["status"] = "SCHEDULED"
+            op["departure_timestamp"] = iso_now()
+            return {"message": "Plan confirmed in the companion; no DCS flight was launched.", "operation": op}, {"plan": op["id"]}
+        raise WorkspaceError("Unknown workspace action.", 404)
