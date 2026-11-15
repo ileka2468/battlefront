@@ -314,6 +314,220 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
         return (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
                 and parsed.netloc == self.headers.get("Host") and origin == "http://" + parsed.netloc)
 
+    def _workspace_write(self):
+        if self.path not in WORKSPACE_ACTIONS:
+            self._send_json({"success": False, "error": "Unknown workspace action."}, 404)
+            return
+        try:
+            if not self._workspace_origin_ok():
+                raise WorkspaceError("Workspace writes require the companion site origin.", 403)
+            if self.headers.get_content_type() != "application/json":
+                raise WorkspaceError("Expected application/json.", 415)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                raise WorkspaceError("Invalid request length.")
+            if not 0 < length <= 8192:
+                raise WorkspaceError("Request body too large or empty.", 413)
+            try:
+                body = json.loads(self.rfile.read(length))
+            except (ValueError, RecursionError):
+                raise WorkspaceError("Invalid JSON.")
+            if not isinstance(body, dict) or any(type(v) not in (str, int, type(None)) for v in body.values()):
+                raise WorkspaceError("Expected a JSON object with scalar fields.")
+            if self.path == "/api/workspace/login":
+                with LOGIN_LOCK:
+                    now = time.monotonic()
+                    while LOGIN_TIMES and now - LOGIN_TIMES[0] > 60:
+                        LOGIN_TIMES.popleft()
+                    if len(LOGIN_TIMES) >= 60:
+                        raise WorkspaceError("Sign-in busy. Try again shortly.", 429)
+                    LOGIN_TIMES.append(now)
+                self.workspace_cookie = workspace.login(body.get("username"), body.get("password"))
+                self._send_json({"success": True})
+                return
+            token = self._workspace_token()
+            session = workspace.session(token)
+            if not session:
+                raise WorkspaceError("Sign in to change the workspace.", 401)
+            supplied = self.headers.get("X-BF-CSRF", "")
+            if not hmac.compare_digest(supplied.encode(), session["csrf"].encode()):
+                raise WorkspaceError("Missing or invalid workspace request token.", 403)
+            if self.path == "/api/workspace/logout":
+                workspace.logout(token)
+                self.workspace_cookie = ""
+                result = {"success": True}
+            else:
+                sectors, _ = self._workspace_sectors() if self.path == "/api/operations/propose" else ([], None)
+                result = workspace.mutate(self.path, session, body, sectors)
+            self._send_json(result)
+        except WorkspaceError as e:
+            self._send_json({"success": False, "error": str(e)}, e.status)
+
+    def _post_state(self):
+        if self.path == "/api/telemetry/push" or (DEMO and self.path not in DEMO_ACTIONS):
+            self.send_error(404)
+            return
+        if DEMO and self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            self.send_error(403)
+            return
+        if self.headers.get_content_type() != "application/json":
+            self.send_error(415)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 8192:
+                self.send_error(413)
+                return
+            req_data = json.loads(self.rfile.read(length))
+            if not isinstance(req_data, dict) or any(type(v) not in (str, int, float, bool, type(None)) for v in req_data.values()):
+                raise ValueError("Expected a JSON object with scalar fields")
+            for key, lo, hi in (("side", 1, 2), ("quantity", 1, 50), ("price_points", 1, 10000),
+                                 ("amount", 1, 100), ("track_id", 1, 2), ("slot_index", 0, 20)):
+                if key in req_data and not lo <= int(req_data[key]) <= hi:
+                    raise ValueError(f"Invalid {key}")
+            if self.path == "/api/player/set_callsign":
+                callsign = req_data.get("callsign")
+                if not isinstance(callsign, str) or not CALLSIGN.fullmatch(callsign.strip()):
+                    raise ValueError("Use 1–24 letters, digits, spaces, underscores or hyphens")
+                if re.sub(r"[^a-z0-9_]", "_", callsign.strip().lower()) == "demo_supply":
+                    raise ValueError("Choose a different callsign")
+            for key in ("munition", "listing_id", "airframe_key", "target_sector", "player_id", "seller_id", "buyer_id"):
+                if key in req_data and (not isinstance(req_data[key], str) or len(req_data[key]) > 100):
+                    raise ValueError(f"Invalid {key}")
+            if "target_sector" in req_data and not re.fullmatch(r"[A-Za-z0-9 &.,_-]{1,100}", req_data["target_sector"]):
+                raise ValueError("Invalid target sector")
+            mgr, campaign_mgr, session = self._managers(create=not DEMO)
+            if session:
+                if session["writes"] >= 300:
+                    self.send_error(429)
+                    return
+                session["writes"] += 1
+                if self.path != "/api/player/set_callsign":
+                    if not session["pilot"]:
+                        self._send_json({"error": "Choose a callsign first"}, 403)
+                        return
+                    for k in ("player_id", "seller_id", "buyer_id"):
+                        req_data[k] = session["pilot"]
+        except (ValueError, TypeError, OverflowError) as e:
+            self._send_json({"success": False, "error": str(e)}, 400)
+            return
+
+        if self.path == "/api/requisition":
+            player_id = req_data.get("player_id", "quenc")
+            munition = req_data.get("munition")
+            res = mgr.buy_munition(player_id, munition)
+            self._send_json(res)
+        elif self.path == "/api/marketplace/list":
+            seller_id = req_data.get("seller_id", "quenc")
+            munition = req_data.get("munition")
+            qty = int(req_data.get("quantity", 1))
+            price = int(req_data.get("price_points", 5))
+            res = mgr.list_for_sale(seller_id, munition, qty, price)
+            self._send_json(res)
+        elif self.path == "/api/marketplace/buy":
+            buyer_id = req_data.get("buyer_id", "quenc")
+            listing_id = req_data.get("listing_id")
+            res = mgr.buy_from_market(buyer_id, listing_id)
+            self._send_json(res)
+        elif self.path == "/api/kill_event":
+            player_id = req_data.get("player_id")
+            kill_type = req_data.get("kill_type", "a2a_kill")
+            res = mgr.award_kill(player_id, kill_type)
+            self._send_json(res)
+        elif self.path == "/api/assist_event":
+            player_id = req_data.get("player_id")
+            assist_type = req_data.get("assist_type", "datalink_assist")
+            res = mgr.award_assist(player_id, assist_type)
+            self._send_json(res)
+        elif self.path == "/api/operations/join":
+            player_id = req_data.get("player_id", "quenc")
+            side = int(req_data.get("side", 2))
+            slot_idx = int(req_data.get("slot_index", 0))
+            res = campaign_mgr.join_operation_slot(player_id, side, slot_idx)
+            self._send_json(res)
+        elif self.path == "/api/operations/leave":
+            player_id = req_data.get("player_id", "quenc")
+            side = int(req_data.get("side", 2))
+            res = campaign_mgr.leave_operation_slot(player_id, side)
+            self._send_json(res)
+        elif self.path == "/api/operations/propose":
+            player_id = req_data.get("player_id", "quenc")
+            side = int(req_data.get("side", 2))
+            target_sector = req_data.get("target_sector", "Novorossiysk Oil Refinery")
+            res = campaign_mgr.propose_operation(player_id, side, target_sector)
+            self._send_json(res)
+        elif self.path == "/api/operations/command":
+            player_id = req_data.get("player_id", "quenc")
+            side = int(req_data.get("side", 2))
+            res = campaign_mgr.assume_command(player_id, side)
+            self._send_json(res)
+        elif self.path == "/api/armory/mount":
+            player_id = req_data.get("player_id", "quenc")
+            munition = req_data.get("munition")
+            player = mgr.get_player(player_id)
+            owned = player.get("inventory", {}).get(munition, 0)
+            if owned > 0:
+                self._send_json({"success": True, "message": f"Mounted 1x {munition} on aircraft.", "munition": munition})
+            else:
+                self._send_json({"success": False, "error": f"You do not have any {munition} in depot inventory."})
+        elif self.path == "/api/operations/launch":
+            player_id = req_data.get("player_id", "quenc")
+            side = int(req_data.get("side", 2))
+            state = campaign_mgr.load_state()
+            op = state.get("operations", {}).get(str(side))
+            if op:
+                op["status"] = "ACTIVE"
+                op["departure_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                campaign_mgr.save_state(state)
+                self._send_json({"success": True, "operation": op, "message": "Flight package launched and cleared hot."})
+            else:
+                self._send_json({"success": False, "error": "No active operation to launch."})
+        elif self.path == "/api/campaign/test_collapse":
+            side = int(req_data.get("side", 1))
+            res = campaign_mgr.trigger_economic_collapse_test(side)
+            self._send_json(res)
+        elif self.path == "/api/campaign/test_restore":
+            side = int(req_data.get("side", 1))
+            res = campaign_mgr.restore_economic_solvency_test(side)
+            self._send_json(res)
+        elif self.path == "/api/upgrades/purchase":
+            side = int(req_data.get("side", 2))
+            airframe_key = req_data.get("airframe_key")
+            track_id = int(req_data.get("track_id", 1))
+            res = campaign_mgr.purchase_airframe_upgrade(side, airframe_key, track_id)
+            self._send_json(res)
+        elif self.path == "/api/demo/grant_merits":
+            player_id = req_data.get("player_id", "quenc")
+            amount = int(req_data.get("amount", 25))
+            data = mgr.load_data()
+            if player_id not in data["players"]:
+                mgr.get_player(player_id)
+                data = mgr.load_data()
+            data["players"][player_id]["points"] = data["players"][player_id].get("points", 0) + amount
+            mgr.save_data(data)
+            self._send_json({"success": True, "new_balance": data["players"][player_id]["points"], "awarded": amount})
+        elif self.path == "/api/player/set_callsign":
+            raw_callsign = req_data.get("callsign", "Pilot").strip()
+            player_id = re.sub(r"[^a-z0-9_]", "_", raw_callsign.lower())
+            if session:
+                session["pilot"] = player_id
+            data = mgr.load_data()
+            if player_id not in data["players"]:
+                data["players"][player_id] = {
+                    "callsign": raw_callsign,
+                    "name": raw_callsign,
+                    "side": int(req_data.get("side", 2)),
+                    "points": 100, # 100 Starter Merits for grading demo
+                    "stats": {"a2a_kills": 0, "a2g_kills": 0, "sorties": 0, "losses": 0},
+                    "inventory": {"AIM-120D": 2, "AGM-88C": 1}
+                }
+                mgr.save_data(data)
+            self._send_json({"success": True, "player": data["players"][player_id], "player_id": player_id})
+        else:
+            self.send_response(404)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
 
     def _send_json(self, data, status=200):
         self.send_response(status)
