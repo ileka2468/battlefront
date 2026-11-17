@@ -1,0 +1,17 @@
+{
+  "name": "battlefront-companion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.jsx --bundle --minify --legal-comments=none --outfile=../web/dist/companion.js && tailwindcss -i src/tailwind.css -o ../web/dist/tailwind.css --minify"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.0"
+  }
+}
