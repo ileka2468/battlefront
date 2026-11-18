@@ -104,5 +104,69 @@ function Table({headers,rows,empty='No entries yet.'}) {
   return <div className="overflow-x-auto border border-line bg-panel"><table className="bf-table"><thead><tr>{headers.map(h=><th scope="col" key={h}>{h}</th>)}</tr></thead><tbody>{rows.length?rows.map(([key,cells])=><tr key={key}>{cells.map((cell,i)=><td key={i}>{cell}</td>)}</tr>):<tr><td colSpan={headers.length}>{empty}</td></tr>}</tbody></table></div>;
 }
 
+function Operations({campaign,player,pilotId,action,open,disabled,production,canCommand}) {
+  const side = player.side || 2;
+  const op = campaign?.operations?.[side];
+  const commander = campaign?.coalitions?.[side]?.human_commander;
+  const isCommander = Boolean(pilotId) && commander === pilotId;
+  const scheduled = op?.status === 'SCHEDULED' || op?.status === 'ACTIVE';
+  const slots = op?.slots || [];
+  return <section id="operationsTab">
+    <Heading title="Flight operations" note="Propose a coalition plan and reserve roster slots. Scheduling saves the plan here; it does not launch a DCS flight.">
+      <div className="flex flex-wrap gap-2">
+        <Btn onClick={()=>open({type:'operation'})} disabled={disabled||production&&op?.status==='PLANNED'}>Propose target</Btn>
+        {(!production||canCommand)&&<Btn onClick={()=>action('/api/operations/command',{side},'Command updated.')} disabled={disabled||Boolean(commander&&!isCommander)}>{isCommander?'Relinquish command':'Take coalition command'}</Btn>}
+      </div>
+    </Heading>
+    {!op?<Empty>{pilotId?'No flight plan available for '+sideName(side)+'.':'Sign in to see your coalition flight plans.'}</Empty>:<Card>
+      <div className="flex flex-wrap justify-between gap-3">
+        <div><p className="eyebrow">{op.status} · {op.target_quadrant}</p><h2 className="text-2xl font-semibold">{op.name}</h2><p className="text-sm text-muted">{op.target_sector} · {op.frequency} · {op.coordinator}</p></div>
+        {(!production||canCommand&&isCommander)&&<Btn kind="primary" disabled={disabled||scheduled||production&&!slots.some(slot=>slot.pilot)} onClick={()=>action('/api/operations/launch',{side},'Flight plan scheduled.')}>{scheduled?'Plan scheduled':'Confirm flight plan'}</Btn>}
+      </div>
+      <p className="my-4 border-l-2 border-emerald-800 bg-field p-3 text-sm text-muted">{op.objective_desc}</p>
+      <h3 className="mb-3 font-semibold">Flight roster</h3>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{slots.map((slot,i)=>{
+        const mine = Boolean(pilotId) && (slot.pilot===pilotId || !production&&slot.pilot===player.callsign);
+        return <Card key={slot.role_title+'-'+i} className="flex min-h-34 flex-col justify-between gap-2">
+          <div><p className="eyebrow">{slot.role} · {slot.pilot_callsign||(!production&&slot.pilot)||(slot.pilot?'Reserved':'Open')}</p><strong>{slot.role_title}</strong><p className="text-xs text-muted">{slot.airframes}</p></div>
+          <Btn disabled={disabled||production&&scheduled||(!mine&&Boolean(slot.pilot))} onClick={()=>action(mine?'/api/operations/leave':'/api/operations/join',mine?{side}:{side,slot_index:i},mine?'Roster slot released.':'Roster slot reserved.')}>{mine?'Leave roster':slot.pilot?'Assigned':'Reserve slot'}</Btn>
+        </Card>;
+      })}</div>
+    </Card>}
+  </section>;
+}
+
+function Armory({player,catalog,action,open,disabled}) {
+  const items=Object.entries(player.inventory||{}).filter(([,n])=>n>0);
+  return <section id="armoryTab"><Heading title="Personal armory" note="Manage inventory and sell orders without changing the live DCS server."><Btn id="openSellModalBtn" kind="primary" onClick={()=>open({type:'sell'})} disabled={disabled||!items.length}>Create sell order</Btn></Heading>
+    {items.length?<div className="card-grid">{items.map(([key,n])=><Card key={key}><p className="eyebrow">{key} · {n} in stock</p><h2 className="my-1 text-xl font-semibold">{catalog[key]?.name||key}</h2><p className="mb-4 text-sm text-muted">{catalog[key]?.type||'Inventory item'}</p><div className="flex flex-wrap gap-2"><Btn disabled={disabled} onClick={()=>action('/api/armory/mount',{munition:key},'Mounted in workspace.')}>Mount on airframe</Btn><Btn disabled={disabled} onClick={()=>open({type:'sell',item:key})}>List for sale</Btn></div></Card>)}</div>:<Empty>No items in your armory. Visit the munitions depot to add inventory.</Empty>}
+  </section>;
+}
+
+function Depot({catalog,player,action,disabled}) {
+  const [filter,setFilter]=useState('all');
+  const entries=Object.entries(catalog).filter(([,v])=>filter==='all'||v.coalition===filter);
+  return <section id="requisitionTab"><Heading title="Munitions depot" note="Spend classroom Combat Merits to requisition inventory."><Filter values={[["all","All fleets"],["BLUFOR","BLUFOR"],["REDFOR","REDFOR"]]} selected={filter} onSelect={setFilter}/></Heading>
+    {entries.length?<div className="card-grid">{entries.map(([key,v])=><Card key={key} className="flex flex-col items-start gap-2"><p className="eyebrow">{v.coalition} · {v.type}</p><h2 className="text-lg font-semibold">{v.name}</h2><p className="text-sm text-muted">{v.desc}</p><p className="text-xs text-muted">{v.range_km} km · Mach {v.mach} · {v.compatible?.join(', ')}</p><Btn className="mt-auto" kind="primary" disabled={disabled||player.points<v.cost_points} onClick={()=>action('/api/requisition',{munition:key},`${key} requisitioned.`)}>Requisition · {v.cost_points} CM</Btn></Card>)}</div>:<Empty>No matching items.</Empty>}
+  </section>;
+}
+
+function Research({observation}) {
+  const [filter,setFilter] = useState('all');
+  const coalitions = observation.snapshot?.coalitions || {};
+  const catalog = [2,1].flatMap(side => (coalitions[side]?.blueprints || []).map(bp => ({...bp,side})));
+  const entries = catalog.filter(bp => filter==='all'||String(bp.side)===filter);
+  return <section id="techTreeTab">
+    <Heading title="DCS airframe research" note="This catalog is read-only. The AI Director and in-game F10 purchases spend the same coalition treasury. New campaign flights use advanced airframes only after their blueprint is paid for.">
+      <Filter values={[[ "all","All fleets" ],[ "2","BLUFOR" ],[ "1","REDFOR" ]]} selected={filter} onSelect={setFilter}/>
+    </Heading>
+    {catalog.length>0&&<p className="eyebrow mb-3" role="status">{observation.current?'Live DCS catalog':'Last reported DCS catalog'}</p>}
+    {entries.length?<div className="card-grid">{entries.map(bp=><Card key={bp.side+'-'+bp.key}>
+      <div className="flex justify-between gap-2"><h2 className="text-xl font-semibold">{bp.name||bp.key}</h2><Side side={bp.side}/></div>
+      <p className="mt-2 text-sm"><strong>{bp.unlocked?'Unlocked':'Locked'}</strong> · {money(bp.cost)}</p>
+    </Card>)}</div>:<Empty>{replay?'This replay has no DCS blueprint ledger.':catalog.length?'No blueprints for this coalition.':'Waiting for the DCS blueprint ledger. No demo catalog is shown.'}</Empty>}
+  </section>;
+}
+
 
 createRoot(document.getElementById('root')).render(<Sidebar section="tacview" setSection={()=>{}} counts={{}} connection="Connecting"/>);
