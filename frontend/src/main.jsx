@@ -168,5 +168,110 @@ function Research({observation}) {
   </section>;
 }
 
+function Exchange({orders,history,catalog,player,pilotId,open,action,disabled}) {
+  const active=orders.filter(x=>x.status==='active');
+  return <section id="marketplaceTab"><Heading title="Player exchange" note={`${active.length} active orders · ${history.reduce((sum,row)=>sum+(+row.price_points||0),0)} CM recorded volume`}><Btn kind="primary" disabled={disabled||!Object.values(player.inventory||{}).some(n=>n>0)} onClick={()=>open({type:'sell'})}>Create sell order</Btn></Heading>
+    <Table headers={['Ordnance','Seller','Quantity','Ask','Action']} empty="No open orders. List an item from your armory." rows={active.map(o=>[o.id,[<strong>{catalog[o.item]?.name||o.item}</strong>,o.seller_callsign,o.quantity,`${o.price_points} CM`,<Btn kind="primary" disabled={disabled||o.seller===pilotId||player.points<o.price_points} onClick={()=>action('/api/marketplace/buy',{listing_id:o.id},'Order purchased.')}>{o.seller===pilotId?'Your order':player.points<o.price_points?'Insufficient CM':'Buy'}</Btn>]])}/>
+    <h2 className="mt-6 mb-3 text-lg font-semibold">Recent trades</h2><Table headers={['Item','Buyer','Seller','Quantity','Price','Time']} rows={history.slice(0,10).map((o,i)=>[o.id||i,[o.item,o.buyer,o.seller,o.quantity,`${o.price_points} CM`,o.timestamp||'Recent']])}/>
+  </section>;
+}
 
-createRoot(document.getElementById('root')).render(<Sidebar section="tacview" setSection={()=>{}} counts={{}} connection="Connecting"/>);
+function Standings({players}) {
+  const rows=Object.entries(players).sort(([,a],[,b])=>(b.points||0)-(a.points||0));
+  return <section id="leaderboardTab"><Heading title="Pilot standings" note="Combat Merits and campaign participation in this workspace."/><Table headers={['Rank','Pilot','Coalition','Air kills','Ground kills','Assists','Sorties','Merits']} rows={rows.map(([id,p],i)=>[id,[`#${i+1}`,p.callsign,<Side side={p.side}/>,p.stats?.a2a_kills||0,p.stats?.a2g_kills||0,p.stats?.datalink_assists||0,p.stats?.sorties||0,`${p.points||0} CM`]])}/></section>;
+}
+
+function Modal({modal,close,player,catalog,campaign,busy,savePilot,action}) {
+  const [item,setItem]=useState(modal.item||Object.keys(player.inventory||{}).find(k=>player.inventory[k]>0)||'');
+  const [qty,setQty]=useState(1);
+  const [price,setPrice]=useState(6);
+  const [callsign,setCallsign]=useState(player.callsign==='Guest'?'':player.callsign);
+  const [side,setSide]=useState(player.side||2);
+  const [sector,setSector]=useState('');
+  const titles={pilot:'Choose a callsign',sell:'Create sell order',operation:'Propose flight target'};
+  useEffect(()=>{const onKey=e=>{if(e.key==='Escape')close();};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[close]);
+  async function submit(e) {
+    e.preventDefault();
+    let done;
+    if(modal.type==='pilot') done=await savePilot(callsign,+side);
+    if(modal.type==='sell') done=await action('/api/marketplace/list',{munition:item,quantity:+qty,price_points:+price},'Sell order posted.');
+    if(modal.type==='operation') done=await action('/api/operations/propose',{side:player.side,target_sector:sector},'Target proposed.');
+    if(done) close();
+  }
+  return <div className="fixed inset-0 z-40 grid place-items-center bg-black/55 p-4" onClick={e=>{if(e.target===e.currentTarget)close();}}><div role="dialog" aria-modal="true" aria-labelledby="modal-title" className="w-full max-w-lg border border-line bg-paper shadow-xl"><form onSubmit={submit} className="grid gap-4 p-5"><div className="flex items-center justify-between"><h2 className="text-xl font-semibold" id="modal-title">{titles[modal.type]}</h2><Btn aria-label="Close dialog" onClick={close}>×</Btn></div>
+  {modal.type==='pilot'&&<><p className="text-sm text-muted">Your callsign is for the companion workspace, not a DCS login.</p><label className="bf-label">Callsign<input id="callsignInput" className="bf-field" value={callsign} onChange={e=>setCallsign(e.target.value)} required maxLength={24} autoFocus placeholder="Enter callsign"/></label><label className="bf-label">Coalition<select id="sideSelect" className="bf-field" value={side} onChange={e=>setSide(e.target.value)}><option value="2">BLUFOR</option><option value="1">REDFOR</option></select></label></>}
+  {modal.type==='sell'&&<><label className="bf-label">Item<select id="sellItemSelect" className="bf-field" value={item} onChange={e=>{setItem(e.target.value);setQty(1);}} required>{Object.entries(player.inventory||{}).filter(([,n])=>n>0).map(([k,n])=><option key={k} value={k}>{catalog[k]?.name||k} ({n} in stock)</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label className="bf-label">Quantity<input className="bf-field" type="number" min="1" max={Math.min(50,player.inventory?.[item]||1)} required value={qty} onChange={e=>setQty(e.target.value)}/></label><label className="bf-label">Ask (CM)<input className="bf-field" type="number" min="1" max="10000" required value={price} onChange={e=>setPrice(e.target.value)}/></label></div></>}
+  {modal.type==='operation'&&<label className="bf-label">Target sector<select className="bf-field" value={sector} onChange={e=>setSector(e.target.value)} required><option value="" disabled>Select a sector</option>{(campaign?.sectors||[]).filter(s=>s.side!==player.side).map(s=><option key={s.name}>{s.name}</option>)}</select></label>}
+  <div className="flex justify-end gap-2"><Btn onClick={close}>{modal.type==='pilot'?'Continue as guest':'Cancel'}</Btn><Btn kind="primary" type="submit" disabled={busy}>{modal.type==='pilot'?'Set callsign':modal.type==='sell'?'Publish listing':'Propose target'}</Btn></div></form></div></div>;
+}
+
+function App() {
+  const [section,setSection]=useState('tacview');
+  const [state,setState]=useState({}),[campaign,setCampaign]=useState(null),[live,setLive]=useState({snapshot:null,current:false,changes:{}});
+  const [pilotId,setPilotId]=useState(''),[pilot,setPilot]=useState(null);
+  const [connection,setConnection]=useState('Connecting'),[busy,setBusy]=useState(false),[modal,setModal]=useState(null),[notice,setNotice]=useState(null);
+  const player=state.players?.[pilotId]||pilot||noPilot;
+  const catalog=state.munition_catalog||{};
+  const armies=campaign?.airframe_upgrades||{};
+  const orders=state.marketplace||[];
+  const counts={armory:Object.values(player.inventory||{}).reduce((s,n)=>s+(+n||0),0),techTree:`${Object.values(armies).reduce((n,a)=>n+Number(Boolean(a.track1?.unlocked))+Number(Boolean(a.track2?.unlocked)),0)}/${Object.keys(armies).length*2}`,marketplace:orders.filter(o=>o.status==='active').length};
+  const title=tabGroups.flatMap(([,t])=>t).find(t=>t[0]===section)?.[1];
+  const alert=(text,error=false)=>setNotice({text,error});
+  async function refresh() {
+    try {
+      const stored=await request('/api/state');
+      setState(stored);
+      setCampaign(await request(`/api/campaign${replay?'?replay=1':''}`));
+      setConnection('Connected');
+    } catch {setConnection('Workspace unavailable');}
+  }
+  async function identify(callsign,side) {
+    const answer=await request('/api/player/set_callsign',{callsign:callsign.trim(),side});
+    setPilotId(answer.player_id||idFor(callsign));setPilot(answer.player);
+    localStorage.setItem('bf_callsign',callsign.trim());localStorage.setItem('bf_side',String(side));
+  }
+  useEffect(()=>{
+    const change=({detail:snapshot})=>{
+      if (replay) return;
+      setLive(previous=>{
+        if (!snapshot) return previous.current?{...previous,current:false}:previous;
+        // A net change can include income/rewards and is distinct from the
+        // authoritative F10 blueprint receipt embedded in the DCS snapshot.
+        const changes=previous.current?{...previous.changes}:{};
+        for (const side of ['1','2']) {
+          const before=previous.snapshot?.coalitions?.[side]?.treasury;
+          const after=snapshot.coalitions?.[side]?.treasury;
+          if (previous.current&&Number.isFinite(before)&&Number.isFinite(after)&&before!==after) changes[side]=Math.round((after-before)*100)/100;
+        }
+        return {snapshot,current:true,changes};
+      });
+    };
+    feedEvents.addEventListener('campaign',change);
+    void (async()=>{
+      await refresh();
+      const name=params.get('callsign')||localStorage.getItem('bf_callsign')||(params.get('demo')==='1'?'Professor_Smith':'');
+      if(name){try{await identify(name,+localStorage.getItem('bf_side')||2);await refresh();}catch(e){alert(e.message,true);}}
+    })();
+    return ()=>feedEvents.removeEventListener('campaign',change);
+  },[]);
+  useEffect(()=>{if(!notice)return;const t=setTimeout(()=>setNotice(null),6500);return()=>clearTimeout(t);},[notice]);
+  async function savePilot(name,side){setBusy(true);try{await identify(name,side);await refresh();alert(`Welcome, ${name.trim()}.`);return true;}catch(e){alert(e.message,true);return false;}finally{setBusy(false);}}
+  async function action(path,fields,message){
+    if(!pilotId){setModal({type:'pilot'});return false;}
+    setBusy(true);try{const data=await request(path,{player_id:pilotId,seller_id:pilotId,buyer_id:pilotId,...fields}); await refresh(); alert(data.message||message||'Done.');return true;}
+    catch(e){alert(e.message,true);return false;}finally{setBusy(false);}
+  }
+  const common={campaign,player,pilotId,action,open:setModal,disabled:busy};
+  return <div className="min-h-screen lg:grid lg:grid-cols-[220px_minmax(0,1fr)]"><Sidebar section={section} setSection={setSection} counts={counts} connection={connection}/><div className="min-w-0">
+    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-panel px-4 py-3 sm:px-7"><div><span className="eyebrow">Campaign workspace</span><div id="workspaceName" className="font-semibold">{title}</div></div><div className="flex flex-wrap items-center gap-3"><Btn onClick={()=>setModal({type:'pilot'})} aria-label={pilotId?'Change callsign':'Choose callsign'}>{pilotId?player.callsign:'Choose callsign'}</Btn>{pilotId&&<><Side side={player.side}/><strong className="font-mono text-xs" id="meritsValue">{player.points} CM</strong>{params.get('demo')==='1'&&<Btn disabled={busy} onClick={()=>action('/api/demo/grant_merits',{amount:25},'25 demo merits awarded.')}>+25 demo CM</Btn>}</>}</div></header>
+    <Theater observation={live}/>
+    <main className="min-w-0 px-3 py-4 sm:px-6 sm:py-6"><Airspace visible={section==='tacview'}/>
+      {section==='operations'&&<Operations {...common}/>}{section==='armory'&&<Armory {...common} catalog={catalog}/>}
+      {section==='requisition'&&<Depot {...common} catalog={catalog}/>}{section==='techTree'&&<Research {...common}/>}
+      {section==='marketplace'&&<Exchange {...common} orders={orders} history={state.trade_history||[]} catalog={catalog}/>}
+      {section==='leaderboard'&&<Standings players={state.players||{}}/>}
+    </main><footer className="border-t border-line px-4 py-3 font-mono text-[10px] text-muted sm:px-7">+2 CM air-to-air · +1 CM ground · +1 CM datalink assist · Classroom transactions are isolated.</footer>
+  </div>{modal&&<Modal key={`${modal.type}-${modal.item||''}`} modal={modal} close={()=>setModal(null)} {...common} catalog={catalog} savePilot={savePilot} busy={busy}/>} {notice&&<div className={`fixed right-4 bottom-4 z-50 max-w-[min(420px,90vw)] border bg-paper p-3 text-sm shadow-lg ${notice.error?'border-red-500':'border-emerald-700'}`} role={notice.error?'alert':'status'}>{notice.text}<button className="ml-4 cursor-pointer text-muted" type="button" aria-label="Dismiss notification" onClick={()=>setNotice(null)}>×</button></div>}</div>;
+}
+
+createRoot(document.getElementById('root')).render(<App/>);
