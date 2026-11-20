@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: battlefront-campaign
+    runtime: python
+    plan: free
+    branch: main
+    autoDeployTrigger: checksPass
+    healthCheckPath: /healthz
+    buildCommand: npm --prefix frontend ci && npm --prefix frontend run build
+    startCommand: python -u cloud/render_gateway.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: BF_ORIGIN_URL
+        sync: false
