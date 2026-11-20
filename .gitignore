@@ -1,5 +1,19 @@
-# Runtime and build artifacts
-.env
+# Runtime, credentials, private captures, generated bundles
+/.env
+/.env.*
+!/.env.example
+/.battlefront/
+/demo/
+/audit/
+/output/
+/.playwright-cli/
+/build/battlefront.lua
+/web/dist/
 __pycache__/
 *.py[cod]
-/build/battlefront.lua
+node_modules/
+*.sqlite3*
+*.pem
+*.key
+/server/persistence/campaign_state.json
+/server/persistence/global_players.json
