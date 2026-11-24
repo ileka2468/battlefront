@@ -91,7 +91,7 @@ function callbacks.onSimulationFrame()
     if not DCS.isServer() then return end
     local now = DCS.getRealTime()
     if now < nextSample then return end
-    nextSample = now + 0.25
+    nextSample = now + 0.20
     local mission = tostring(DCS.getMissionFilename() or ""):gsub("\\","/"):match("([^/]+)$") or ""
     local name = mission:lower():gsub("%.miz$","")
     local campaign = name == 'battlefront_caucasus' or tostring(DCS.getMissionName() or ""):lower() == 'battlefront_caucasus'

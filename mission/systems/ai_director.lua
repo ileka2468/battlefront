@@ -31,6 +31,7 @@ Director.slotCooldowns = { [1] = {}, [2] = {} }
 Director.roleCooldowns = { [1] = {}, [2] = {} }
 Director.groupCounter = 5000
 Director.researchReadyAt = {}
+Director.censusLogAt = {}
 
 Director.config = {
     maxCoalitionAircraft = 10, -- Includes active human and non-director aircraft
@@ -634,12 +635,14 @@ function Director.GetActiveAircraftCount(side)
         local total, seen = 0, {}
         local function include(unit, occupied)
             if not unit:isExist() or not (occupied or unit:isActive()) then return end
-            local id = unit:getID()
-            assert(type(id) == "number")
+            -- DCS can return unit IDs as strings while other API paths return
+            -- numbers. Normalize both so the player list cannot double-count.
+            local id = tonumber(unit:getID())
+            assert(id and id > 0 and id < math.huge and id == math.floor(id), "invalid DCS unit ID")
             if seen[id] then return end
             if occupied then
-                local category = unit:getDesc().category
-                assert(type(category) == "number")
+                local category = tonumber(unit:getDesc().category)
+                assert(category, "missing player unit category")
                 if category ~= Unit.Category.AIRPLANE and category ~= Unit.Category.HELICOPTER then return end
             end
             seen[id] = true
@@ -647,25 +650,25 @@ function Director.GetActiveAircraftCount(side)
         end
 
         local airplane, helicopter = Group.Category.AIRPLANE, Group.Category.HELICOPTER
-        assert(type(airplane) == "number" and type(helicopter) == "number" and airplane ~= helicopter)
+        assert(type(airplane) == "number" and type(helicopter) == "number" and airplane ~= helicopter, "missing DCS aircraft group categories")
         for _, category in ipairs({airplane, helicopter}) do
             local groups = coalition.getGroups(side, category)
-            assert(type(groups) == "table")
+            assert(type(groups) == "table", "missing DCS coalition group list")
             for _, group in pairs(groups) do
                 if group:isExist() then
                     local units = group:getUnits()
-                    assert(type(units) == "table")
+                    assert(type(units) == "table", "missing DCS group unit list")
                     for _, unit in pairs(units) do include(unit, false) end
                 end
             end
         end
         local players = coalition.getPlayers(side)
-        assert(type(players) == "table")
+        assert(type(players) == "table", "missing DCS coalition player list")
         for _, unit in pairs(players) do include(unit, true) end
         return total
     end)
     if ok then return count end
-    return nil
+    return nil, count
 end
 
 function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
@@ -1045,7 +1048,7 @@ function Director.Loop()
     for side = 1, 2 do
         for grpName, gData in pairs(Director.activeGroups[side]) do
             local grp = Group.getByName(grpName)
-            if not grp or not grp:isExist() or #grp:getUnits() == 0 then
+            if not grp or not grp:isExist() or grp:getSize() == 0 then
                 -- Do not lose track of a surviving aircraft because its sortie ran long.
                 if gData.role == "CAP" and gData.capSlot then
                     -- 3-Minute Scramble Cooldown (180s)
@@ -1072,7 +1075,11 @@ function Director.Loop()
     local capSlots = { [SIDE_RED] = {"NW", "NE", "CENTER"}, [SIDE_BLUE] = {"SW", "SE", "CENTER"} }
     local free = {}
     for _, side in ipairs({SIDE_RED, SIDE_BLUE}) do
-        local active = Director.GetActiveAircraftCount(side)
+        local active, censusError = Director.GetActiveAircraftCount(side)
+        if not active and now >= (Director.censusLogAt[side] or 0) then
+            Director.censusLogAt[side] = now + 60
+            log(string.format("AI DIRECTOR: coalition %d aircraft census unavailable; launch deferred: %s", side, tostring(censusError)))
+        end
         free[side] = active and math.max(0, Director.config.maxCoalitionAircraft - active) or 0
     end
 
