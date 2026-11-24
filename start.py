@@ -49,8 +49,10 @@ def main():
             subprocess.run([npm,'--prefix','frontend',command]+(['build'] if command=='run' else []),check=True)
     if not (ROOT/'web/dist/companion.js').is_file(): raise SystemExit('Frontend is missing; run python start.py without --no-build.')
     if settings.get('BF_WORKSPACE')=='1' and not Path(settings['BF_WORKSPACE_ACCOUNTS_FILE']).is_file():
-        subprocess.run([sys.executable,'scripts/provision_workspace_account.py','--file',settings['BF_WORKSPACE_ACCOUNTS_FILE'],
-                        '--username','professor','--callsign','Professor','--side','blue','--role','admin','--generate'],check=True,env=settings)
+        for handle,callsign,role in [('professor','Professor','admin'),('wingman','Wingman','member')]:
+            subprocess.run([sys.executable,'scripts/provision_workspace_account.py','--file',settings['BF_WORKSPACE_ACCOUNTS_FILE'],
+                            '--username',handle,'--callsign',callsign,'--side','blue','--role',role,
+                            '--starter-merits','24','--generate'],check=True,env=settings)
     print(f'Local workspace: http://127.0.0.1:{settings["PORT"]}/ · recording: /?replay=1',flush=True)
     try: return subprocess.call([sys.executable,'-u','web/server.py'],env=settings)
     except KeyboardInterrupt: return 0

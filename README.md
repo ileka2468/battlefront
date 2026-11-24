@@ -12,7 +12,7 @@ cd battlefront
 python start.py
 ```
 
-Open <http://127.0.0.1:8088/>. The script installs the locked frontend dependencies, builds React/Tailwind, provisions a local grading account (`professor`, random password printed once), and starts the backend. SQLite creates its schema and loads the catalog automatically on first start. Nothing in this local workflow connects to production or spends its currency. If a local port is occupied, use `python start.py --port 8089`. See [`.env.example`](.env.example) for optional overrides.
+Open <http://127.0.0.1:8088/>. The script installs the locked frontend dependencies, builds React/Tailwind, provisions two local grading accounts (`professor` and `wingman`, random passwords printed once), and starts the backend. SQLite creates its schema and loads the catalog automatically on first start. Both accounts start with 24 Companion Merits so a grader can place an order in one browser and buy it in another. Nothing in this local workflow connects to production or spends its currency. If a local port is occupied, use `python start.py --port 8089`. See [`.env.example`](.env.example) for optional overrides.
 
 To see airspace without DCS, select **20v20 replay**. It is a recorded 40-aircraft simulation with its own time controls, not synthetic live data. The live view explicitly waits for DCS when no live feed is configured. To reset **only a local clone**, stop the app and move its `.battlefront/` folder aside before restarting.
 
