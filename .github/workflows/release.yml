@@ -38,5 +38,9 @@ jobs:
           sudo apt-get install -y lua5.1
           find mission -name '*.lua' -print0 | xargs -0 -n 1 luac5.1 -p
           luac5.1 -p server/BattlefrontCampaignExport.lua
+          { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,aircraft,economy,ai_director}.lua scripts/verify_director_progression.lua; } | lua5.1 -
       - name: Test durable workspace and deployment edge
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m unittest discover -s tests -v
+          python scripts/verify_production_workspace.py
+          node scripts/verify_live_motion.cjs
