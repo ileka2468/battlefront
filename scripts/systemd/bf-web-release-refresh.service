@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the checked Battlefront web release
+After=bf-classroom-preview.service
+
+[Service]
+Type=oneshot
+UMask=0077
+TimeoutStartSec=3min
+ExecStart=/usr/bin/python3 %h/.local/lib/battlefront/refresh_web_release.py --root %h/battlefront-companion-v2 --repo ileka2468/battlefront

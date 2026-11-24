@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a verified Battlefront web release every four minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=4min
+RandomizedDelaySec=20s
+Unit=bf-web-release-refresh.service
+
+[Install]
+WantedBy=timers.target
