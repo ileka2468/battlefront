@@ -30,7 +30,8 @@ timer = {
     scheduleFunction = function(fn, _, when) scheduled = { fn = fn, when = when } end,
 }
 D.SelectTargetSector = function() return nil end
-D.SpawnFlight = function() processed = processed + 1 end
+D.GetActiveAircraftCount = function() return 0 end
+D.SpawnFlight = function() processed = processed + 1; return true end
 D.Start()
 assert(scheduled.fn == D.Loop and scheduled.when == 5010)
 local function at(delta)

@@ -1,16 +1,13 @@
 -- ==============================================================================
--- BATTLEFRONT AIR WAR: 15 v 15 AUTONOMOUS AI CAMPAIGN DIRECTOR (30 COMBAT AIRCRAFT)
+-- BATTLEFRONT AIR WAR: 10 v 10 AUTONOMOUS AI CAMPAIGN DIRECTOR
 -- ==============================================================================
--- Coordinates a persistent, dynamic 15 v 15 air war between BLUFOR and REDFOR.
+-- Coordinates a persistent air war with a native coalition-wide aircraft budget.
 -- Features:
 --   1. Dynamic Tech Tree & Research Rules: Starts with Tier 1 baseline aircraft
 --      (F-15C, F-16C, Su-27, MiG-29S, A-10A, Su-25T). Upgrades to advanced
 --      airframes (F-22A, F-23A, F-117A, Su-57, J-20A, Su-35S, Su-34) ONLY
 --      when unlocked via coalition R&D research.
---   2. Multi-Quadrant 15 v 15 Fleet Distribution:
---      Maintains 6 Fighters (3x 2-ship CAP flights), 4 Bombers (2x 2-ship Strikes),
---      2 Escorts (1x 2-ship), 2 SEAD jets (1x 2-ship), and 1 Logistics helo per side.
---      Spreads the air war evenly across NW, NE, SW, SE, and the Central Frontline!
+--   2. Two primary patrol pairs, mixed support, and a third patrol if space permits.
 --   3. Precision Bombing & Strike Execution:
 --      Guarantees dive-bombing passes with unguided iron bombs (Mk-82s, OFAB-250)
 --      and level precision drops for stealth penetrators (F-117A GBU-27).
@@ -36,6 +33,7 @@ Director.groupCounter = 5000
 Director.researchReadyAt = {}
 
 Director.config = {
+    maxCoalitionAircraft = 10, -- Includes active human and non-director aircraft
     respawnCooldown = 90,        -- 90s replacement scramble
     capOrbitAltitude = 6500,     -- FL210
     strikeIngressSpeed = 240,    -- ~470 kts
@@ -630,13 +628,57 @@ end
 -- ------------------------------------------------------------------------------
 -- 5. FLIGHT SPAWNING & WAYPOINT GENERATION
 -- ------------------------------------------------------------------------------
+function Director.GetActiveAircraftCount(side)
+    if side ~= SIDE_RED and side ~= SIDE_BLUE then return nil end
+    local ok, count = pcall(function()
+        local total, seen = 0, {}
+        local function include(unit, occupied)
+            if not unit:isExist() or not (occupied or unit:isActive()) then return end
+            local id = unit:getID()
+            assert(type(id) == "number")
+            if seen[id] then return end
+            if occupied then
+                local category = unit:getDesc().category
+                assert(type(category) == "number")
+                if category ~= Unit.Category.AIRPLANE and category ~= Unit.Category.HELICOPTER then return end
+            end
+            seen[id] = true
+            total = total + 1
+        end
+
+        local airplane, helicopter = Group.Category.AIRPLANE, Group.Category.HELICOPTER
+        assert(type(airplane) == "number" and type(helicopter) == "number" and airplane ~= helicopter)
+        for _, category in ipairs({airplane, helicopter}) do
+            local groups = coalition.getGroups(side, category)
+            assert(type(groups) == "table")
+            for _, group in pairs(groups) do
+                if group:isExist() then
+                    local units = group:getUnits()
+                    assert(type(units) == "table")
+                    for _, unit in pairs(units) do include(unit, false) end
+                end
+            end
+        end
+        local players = coalition.getPlayers(side)
+        assert(type(players) == "table")
+        for _, unit in pairs(players) do include(unit, true) end
+        return total
+    end)
+    if ok then return count end
+    return nil
+end
+
 function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
+    if side ~= SIDE_RED and side ~= SIDE_BLUE then return false, "invalid_coalition" end
     local tmpl = Director.ResolveTemplate(side, role)
     if tmpl and not BF.Research.CanFieldAirframe(side, tmpl.type) then
         log("AI DIRECTOR: blocked unpurchased or unregistered airframe " .. tostring(tmpl.type))
         return false
     end
-    if not tmpl then return end
+    if not tmpl then return false, "no_template" end
+    local count = Director.GetActiveAircraftCount(side)
+    if not count then return false, "aircraft_count_unavailable" end
+    if count + tmpl.count > Director.config.maxCoalitionAircraft then return false, "aircraft_cap" end
 
     Director.groupCounter = Director.groupCounter + 1
     local grpId = Director.groupCounter
@@ -886,10 +928,18 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
         table.insert(groupData.units, uData)
     end
 
+    local spawned = false
     local ok, err = pcall(function()
-        coalition.addGroup(countryId, cat, groupData)
-        local grp = Group.getByName(grpName)
+        local grp = coalition.addGroup(countryId, cat, groupData) or Group.getByName(grpName)
         if grp then
+            spawned = true
+            Director.activeGroups[side][grpName] = {
+                role = assignedRole,
+                target = targetSec and targetSec.name or "Contested Sector",
+                quadrant = targetQuadrant,
+                capSlot = capSlot,
+                spawnTime = timer.getTime()
+            }
             local ctrl = grp:getController()
             if ctrl then
                 ctrl:setOption(AI.Option.Air.id.ROE, AI.Option.Air.val.ROE.WEAPON_FREE)
@@ -967,13 +1017,6 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
                 end
             end
 
-            Director.activeGroups[side][grpName] = {
-                role = assignedRole,
-                target = targetSec and targetSec.name or "Contested Sector",
-                quadrant = targetQuadrant,
-                capSlot = capSlot,
-                spawnTime = timer.getTime()
-            }
             local tgtName = targetSec and targetSec.name or "Contested Airspace"
             local logMsg = string.format("AI DIRECTOR: Scrambled [%s] %s (%s x%d) from %s -> %s [%s]",
                 sideName, grpName, tmpl.type, tmpl.count, origin.name or "Staging", tgtName, targetQuadrant)
@@ -985,6 +1028,7 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
     if not ok then
         log(string.format("AI DIRECTOR SPAWN ERROR [%s] %s: %s", sideName, grpName, tostring(err)))
     end
+    return spawned
 end
 
 -- ------------------------------------------------------------------------------
@@ -1001,8 +1045,8 @@ function Director.Loop()
     for side = 1, 2 do
         for grpName, gData in pairs(Director.activeGroups[side]) do
             local grp = Group.getByName(grpName)
-            if not grp or not grp:isExist() or grp:getSize() == 0 or (now - gData.spawnTime > 900) then
-                -- Group was destroyed or mission timed out!
+            if not grp or not grp:isExist() or #grp:getUnits() == 0 then
+                -- Do not lose track of a surviving aircraft because its sortie ran long.
                 if gData.role == "CAP" and gData.capSlot then
                     -- 3-Minute Scramble Cooldown (180s)
                     -- Simulates ramp preparation, taxi, takeoff roll, and scramble transit!
@@ -1024,136 +1068,61 @@ function Director.Loop()
         end
     end
 
-    -- 3. Dedicated Fighter Dominance Across All Fronts (30 v 30 Fleet Architecture = 60 Active AI Aircraft):
-    --    Each coalition maintains 6x 2-ship CAP flights (12 Fighters per side, 24 Fighters total):
-    --    - Slot 1: West Front (NW for Red / SW for Blue)
-    --    - Slot 2: East Front (NE for Red / SE for Blue - Mineralnye Vody vs Senaki-Kolkhi)
-    --    - Slot 3: Central Contested Meridian Sweep (Maykop vs Gudauta)
-    --    - Slot 4: Coastal Defense Intercept (Krymsk vs Sochi)
-    --    - Slot 5: Eastern Mountain Barrier High Sweep (Mozdok vs Kutaisi)
-    --    - Slot 6: Central Frontline Intercept
-    local quadrantCapSlots = {
-        [SIDE_RED] = {
-            { quad = "NW", label = "NW Front (Krymsk)" },
-            { quad = "NE", label = "NE Front (Mineralnye Vody)" },
-            { quad = "CENTER", label = "Central Front Sweep" },
-            { quad = "NW", label = "NW Coastal Intercept" },
-            { quad = "NE", label = "NE High Sweep (Mozdok)" },
-            { quad = "CENTER", label = "Central Ridge Intercept" }
-        },
-        [SIDE_BLUE] = {
-            { quad = "SW", label = "SW Front (Sochi-Adler)" },
-            { quad = "SE", label = "SE Front (Senaki-Kolkhi)" },
-            { quad = "CENTER", label = "Central Front Sweep" },
-            { quad = "SW", label = "SW Coastal Intercept" },
-            { quad = "SE", label = "SE Valley High Sweep" },
-            { quad = "CENTER", label = "Central Ridge Intercept" }
-        }
-    }
-
-    -- Interleave CAP Spawning across slots and sides
-    local capFilled = { [SIDE_RED] = 0, [SIDE_BLUE] = 0 }
-    for slotIdx = 1, 6 do
-        for _, side in ipairs({ SIDE_RED, SIDE_BLUE }) do
-            local sDef = quadrantCapSlots[side][slotIdx]
-            local slotFilled = false
-            for _, gData in pairs(Director.activeGroups[side]) do
-                if gData.role == "CAP" and gData.capSlot == slotIdx then
-                    slotFilled = true
-                    capFilled[side] = capFilled[side] + 1
-                    break
-                end
-            end
-            if not slotFilled then
-                local cd = Director.slotCooldowns[side][slotIdx] or 0
-                if now >= cd then
-                    local targetSec = Director.SelectTargetSector("CAP", side, sDef.quad)
-                    Director.SpawnFlight(side, "CAP", targetSec, sDef.quad, slotIdx)
-                    return now + 8 -- Smooth 8-second pacing between individual scrambles
-                end
-                -- If slot is on cooldown (now < cd), NO REPLACEMENT SPAWNS!
-                -- This guarantees a 3-minute opening where the opposing side holds air superiority!
-            end
-        end
+    -- Two patrol pairs first. Ring-fence room for distinct support roles before optional CAP.
+    local capSlots = { [SIDE_RED] = {"NW", "NE", "CENTER"}, [SIDE_BLUE] = {"SW", "SE", "CENTER"} }
+    local free = {}
+    for _, side in ipairs({SIDE_RED, SIDE_BLUE}) do
+        local active = Director.GetActiveAircraftCount(side)
+        free[side] = active and math.max(0, Director.config.maxCoalitionAircraft - active) or 0
     end
 
-    -- AIR SUPERIORITY INITIAL BUFFER:
-    -- At mission start, allow CAP fighters at least 60s to ingress and establish combat patrols
-    if now < 60 then
-        return now + 10
-    end
-
-    -- 4. Multi-Role Package Quotas & Air Superiority Window Exploitation:
-    --    When enemy CAP in a quadrant is destroyed, SEAD and Strike immediately scramble
-    --    to exploit the undefended airspace before the enemy's 3-minute cooldown expires!
-    local supportQuotas = {
-        { role = "SEAD", maxCount = 2 },      -- 2 flights x 2-ship = 4 SEAD jets per side
-        { role = "STRIKE", maxCount = 4 },    -- 4 flights x 2-ship = 8 Strike jets per side (A-4E-C / Su-25T)
-        { role = "ESCORT", maxCount = 2 },    -- 2 flights x 2-ship = 4 Escort fighters per side
-        { role = "LOGISTICS", maxCount = 1 }  -- 1 flight x 2-ship = 2 Cargo helos per side
-    }
-
-    for _, sq in ipairs(supportQuotas) do
-        local counts = {}
-        for _, side in ipairs({ SIDE_RED, SIDE_BLUE }) do
-            counts[side] = 0
-            for _, gData in pairs(Director.activeGroups[side]) do
-                if gData.role == sq.role then
-                    counts[side] = counts[side] + 1
-                end
-            end
-        end
-
-        if counts[SIDE_RED] < sq.maxCount or counts[SIDE_BLUE] < sq.maxCount then
-            local targetSide = (counts[SIDE_RED] <= counts[SIDE_BLUE]) and SIDE_RED or SIDE_BLUE
-            if counts[targetSide] >= sq.maxCount then
-                targetSide = (targetSide == SIDE_RED) and SIDE_BLUE or SIDE_RED
-            end
-
-            -- Check turnaround cooldown for this role (prevents endless wave spam):
-            local rCd = Director.roleCooldowns[targetSide][sq.role] or 0
-            if now >= rCd then
-                -- Determine which front has the open Air Superiority Window:
-                local enemySide = (targetSide == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
-                local enemyWestCap = false
-                local enemyEastCap = false
-                for _, egData in pairs(Director.activeGroups[enemySide]) do
-                    if egData.role == "CAP" then
-                        if egData.quadrant == "NW" or egData.quadrant == "SW" then
-                            enemyWestCap = true
-                        elseif egData.quadrant == "NE" or egData.quadrant == "SE" then
-                            enemyEastCap = true
-                        end
+    local function tryPatrol(first, last)
+        for slot = first, last do
+            for _, side in ipairs({SIDE_RED, SIDE_BLUE}) do
+                if free[side] >= 2 and now >= (Director.slotCooldowns[side][slot] or 0) then
+                    local filled = false
+                    for _, flight in pairs(Director.activeGroups[side]) do
+                        if flight.role == "CAP" and flight.capSlot == slot then filled = true; break end
+                    end
+                    if not filled then
+                        local quad = capSlots[side][slot]
+                        local target = Director.SelectTargetSector("CAP", side, quad)
+                        if Director.SpawnFlight(side, "CAP", target, quad, slot) then return true end
                     end
                 end
-
-                -- Prioritize pushing into the front where enemy CAP is down!
-                local preferredFront = nil
-                if not enemyWestCap then
-                    preferredFront = (targetSide == SIDE_BLUE) and "SW" or "NW"
-                elseif not enemyEastCap then
-                    preferredFront = (targetSide == SIDE_BLUE) and "SE" or "NE"
-                else
-                    -- Both enemy CAPs active; alternate based on density
-                    local activeQuadrants = {}
-                    for _, gData in pairs(Director.activeGroups[targetSide]) do
-                        if gData.quadrant then
-                            activeQuadrants[gData.quadrant] = (activeQuadrants[gData.quadrant] or 0) + 1
-                        end
-                    end
-                    local westCount = (activeQuadrants["NW"] or 0) + (activeQuadrants["SW"] or 0)
-                    local eastCount = (activeQuadrants["NE"] or 0) + (activeQuadrants["SE"] or 0)
-                    preferredFront = (westCount > eastCount)
-                        and (targetSide == SIDE_BLUE and "SE" or "NE")
-                        or  (targetSide == SIDE_BLUE and "SW" or "NW")
-                end
-
-                local targetSec = Director.SelectTargetSector(sq.role, targetSide, preferredFront)
-                Director.SpawnFlight(targetSide, sq.role, targetSec, preferredFront)
-                return now + 8
             end
         end
+        return false
     end
+
+    local function trySupport(role)
+        local counts = {[SIDE_RED]=0, [SIDE_BLUE]=0}
+        for _, side in ipairs({SIDE_RED, SIDE_BLUE}) do
+            for _, flight in pairs(Director.activeGroups[side]) do
+                if flight.role == role then counts[side] = counts[side] + 1 end
+            end
+        end
+        local first = counts[SIDE_RED] <= counts[SIDE_BLUE] and SIDE_RED or SIDE_BLUE
+        local second = first == SIDE_RED and SIDE_BLUE or SIDE_RED
+        for _, side in ipairs({first, second}) do
+            if free[side] >= 2 and counts[side] < 1 and now >= (Director.roleCooldowns[side][role] or 0) then
+                local west, east = 0, 0
+                for _, flight in pairs(Director.activeGroups[side]) do
+                    if flight.quadrant == "NW" or flight.quadrant == "SW" then west = west + 1 end
+                    if flight.quadrant == "NE" or flight.quadrant == "SE" then east = east + 1 end
+                end
+                local quad = capSlots[side][west <= east and 1 or 2]
+                local target = Director.SelectTargetSector(role, side, quad)
+                if Director.SpawnFlight(side, role, target, quad) then return true end
+            end
+        end
+        return false
+    end
+
+    if tryPatrol(1, 2) then return now + 8 end
+    if now < 60 then return now + 10 end
+    if trySupport("SEAD") or trySupport("STRIKE") or tryPatrol(3, 3)
+        or trySupport("ESCORT") or trySupport("LOGISTICS") then return now + 8 end
 
     return now + 15
 end
