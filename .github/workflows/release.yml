@@ -37,10 +37,46 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y lua5.1
           find mission -name '*.lua' -print0 | xargs -0 -n 1 luac5.1 -p
-          luac5.1 -p server/BattlefrontCampaignExport.lua
+          python scripts/build_dcs_engine.py
+          luac5.1 -p build/battlefront.lua
           { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,aircraft,economy,ai_director}.lua scripts/verify_director_progression.lua; } | lua5.1 -
+          { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,ai_director}.lua scripts/verify_aircap.lua; } | lua5.1 -
       - name: Test durable workspace and deployment edge
         run: |
           python -m unittest discover -s tests -v
           python scripts/verify_production_workspace.py
           node scripts/verify_live_motion.cjs
+  publish-origin:
+    name: Publish verified web release
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Assemble allowlisted origin release
+        run: |
+          npm --prefix frontend ci && npm --prefix frontend run build
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 \
+            -czf battlefront-web.tar.gz \
+            web/index.html web/server.py web/tacview.js web/dist/companion.js web/dist/tailwind.css \
+            server/telemetry_engine.py server/persistence/workspace_store.py
+          sha256sum battlefront-web.tar.gz > battlefront-web.sha256
+      - name: Publish to the origin's verified release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view web-production >/dev/null 2>&1; then
+            gh release create web-production --target "$GITHUB_SHA" --title 'Battlefront web release channel' \
+              --notes 'Checks-passed web build for the Battlefront origin. The SQLite database and DCS instance are not in this archive.'
+          fi
+          gh release upload web-production battlefront-web.tar.gz battlefront-web.sha256 --clobber
