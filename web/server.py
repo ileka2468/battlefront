@@ -24,7 +24,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "s
 from inventory_manager import InventoryManager
 from campaign_manager import CampaignManager
 from telemetry_engine import TelemetryEngine
-from workspace_store import WorkspaceError, WorkspaceStore, SESSION_SECONDS
 
 PORT = int(os.environ.get("PORT", 8088))
 WEB_DIR = os.path.dirname(__file__)
@@ -32,7 +31,7 @@ WORKSPACE = os.environ.get("BF_WORKSPACE") == "1"
 DEMO = not WORKSPACE and os.environ.get("BF_DEMO") == "1"
 DEMO_PASSWORD = os.environ.get("BF_DEMO_PASSWORD") if DEMO or WORKSPACE else None
 WORKSPACE_ORIGIN = os.environ.get("BF_WORKSPACE_ORIGIN", "").rstrip("/")
-if WORKSPACE_ORIGIN:
+if WORKSPACE and WORKSPACE_ORIGIN:
     parsed_origin = urlsplit(WORKSPACE_ORIGIN)
     if (parsed_origin.scheme not in ("https", "http") or not parsed_origin.hostname or parsed_origin.username
         or parsed_origin.path or parsed_origin.query or parsed_origin.fragment
@@ -65,6 +64,7 @@ STATE_LOCK = RLock()
 LOGIN_LOCK = Lock()
 LOGIN_TIMES = deque()
 if WORKSPACE:
+    from workspace_store import WorkspaceError, WorkspaceStore, SESSION_SECONDS
     database = os.environ.get("BF_WORKSPACE_DB", str(Path.home() / ".local/state/battlefront/workspace.sqlite3"))
     accounts = os.environ.get("BF_WORKSPACE_ACCOUNTS_FILE")
     default_catalog = Path(WEB_DIR).parent / "server/demo_catalog.json"

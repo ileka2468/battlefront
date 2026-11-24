@@ -16,7 +16,7 @@ from workspace_store import CALLSIGN, USERNAME, credential, read_accounts
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--file", type=Path, required=True, help="Private credential path outside the checkout")
+    cli.add_argument("--file", type=Path, required=True, help="Private credential path outside the checkout or below .battlefront")
     cli.add_argument("--username", required=True)
     cli.add_argument("--callsign", required=True)
     cli.add_argument("--side", choices=("red", "blue"), required=True)
@@ -27,8 +27,8 @@ def main():
     args = cli.parse_args()
     name, callsign = args.username.lower(), args.callsign.strip()
     location = args.file.expanduser().resolve()
-    if ROOT == location or ROOT in location.parents:
-        cli.error("Store account credentials outside the repository")
+    if (ROOT == location or ROOT in location.parents) and ROOT / ".battlefront" not in location.parents:
+        cli.error("Store credentials outside the repository or in its ignored .battlefront directory")
     if not USERNAME.fullmatch(name) or not CALLSIGN.fullmatch(callsign) or not 0 <= args.starter_merits <= 100:
         cli.error("Invalid account handle, callsign or starter merits")
     accounts = read_accounts(location)

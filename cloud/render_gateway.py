@@ -12,7 +12,7 @@ import mimetypes
 WEB = Path(__file__).resolve().parents[1] / 'web'
 READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry'}
 WRITE = {'/api/workspace/login','/api/workspace/logout','/api/player/set_callsign','/api/requisition',
-         '/api/marketplace/list','/api/marketplace/buy','/api/armory/mount',
+         '/api/marketplace/list','/api/marketplace/buy','/api/marketplace/cancel','/api/armory/mount',
          '/api/operations/join','/api/operations/leave','/api/operations/propose',
          '/api/operations/command','/api/operations/launch'}
 STATIC = {'/','/index.html','/sectors.json','/tacview.js','/caucasus_terrain.js','/airframes.js',
