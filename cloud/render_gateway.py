@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import mimetypes
 
 WEB = Path(__file__).resolve().parents[1] / 'web'
+MAX_REQUEST_BODY = 16384
 READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry'}
 WRITE = {'/api/workspace/login','/api/workspace/logout','/api/player/set_callsign','/api/requisition',
          '/api/marketplace/list','/api/marketplace/buy','/api/marketplace/cancel','/api/armory/mount',
@@ -24,6 +25,26 @@ for row in json.loads((WEB/'models/vendor/manifest.json').read_text()).values():
     if re.fullmatch(r'/models/vendor/[a-z0-9-]+\.glb',row['file']): STATIC.add(row['file'])
 
 
+def release_id(raw):
+    return raw[:12].lower() if raw and re.fullmatch(r'[a-fA-F0-9]{12,64}',raw) else None
+
+
+def declared_body_size(headers):
+    lengths=headers.get_all('Content-Length',[])
+    # The edge only accepts already framed, fixed-length bodies. Don't
+    # reinterpret duplicate lengths or dechunk content on behalf of the origin.
+    if headers.get_all('Transfer-Encoding',[]) or len(lengths)>1:
+        raise ValueError('Unsupported request framing')
+    if not lengths:
+        return None
+    raw=lengths[0]
+    if not re.fullmatch(r'[0-9]+',raw):
+        raise ValueError('Invalid request length')
+    if len(raw)>10 or (size:=int(raw))>MAX_REQUEST_BODY:
+        raise OverflowError('Request body too large')
+    return size
+
+
 class Gateway(BaseHTTPRequestHandler):
     protocol_version='HTTP/1.1'
 
@@ -35,7 +56,7 @@ class Gateway(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *values):
         # Polling is frequent. No request body, identity or credentials in logs.
-        if self.path.split('?',1)[0]!='/api/telemetry': super().log_message(fmt,*values)
+        if getattr(self,'path','').split('?',1)[0]!='/api/telemetry': super().log_message(fmt,*values)
 
     def payload(self,status,data,content='application/json',headers=()):
         self.send_response(status)
@@ -46,14 +67,37 @@ class Gateway(BaseHTTPRequestHandler):
         if self.command!='HEAD': self.wfile.write(data)
 
     def error(self,status,message):
-        self.payload(status,json.dumps({'success':False,'error':message}).encode(),headers=[('Cache-Control','no-store')])
+        # Early exits can leave the request body unread. This connection must
+        # not be reused for another request.
+        self.close_connection=True
+        self.payload(status,json.dumps({'success':False,'error':message}).encode(),
+                     headers=[('Cache-Control','no-store'),('Connection','close')])
+
+    def handle_expect_100(self):
+        self.error(417,'Request expectations are not supported')
+        return False
 
     def handle_route(self):
-        target=urlsplit(self.path); path=target.path
+        try:
+            target=urlsplit(self.path); path=target.path
+        except ValueError:
+            return self.error(400,'Invalid request target')
         if target.netloc or target.scheme or len(self.path)>400:
             return self.error(400,'Invalid request target')
+        if self.headers.get_all('Expect',[]):
+            return self.error(417,'Request expectations are not supported')
+        try:
+            size=declared_body_size(self.headers)
+        except (ValueError,OverflowError) as error:
+            return self.error(413 if isinstance(error,OverflowError) else 400,str(error))
+        if self.command!='POST' and size:
+            return self.error(400,'Request body is not allowed on this method')
         if path=='/healthz' and self.command in ('GET','HEAD'):
-            return self.payload(200,b'{"ok":true,"service":"battlefront-edge"}')
+            health={'ok':True,'service':'battlefront-edge'}
+            release=getattr(self.server,'release',None)
+            if release:
+                health['release']=release
+            return self.payload(200,json.dumps(health).encode(),headers=[('Cache-Control','no-store')])
         if self.command in ('GET','HEAD') and path in STATIC:
             relative='index.html' if path=='/' else path[1:]
             item=WEB/relative
@@ -82,13 +126,11 @@ class Gateway(BaseHTTPRequestHandler):
         if post:
             if origin!=self.server.public_origin or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin'):
                 return self.error(403,'Same-origin request required')
-            try: size=int(self.headers.get('Content-Length','-1'))
-            except ValueError: size=-1
-            if not 0<=size<=16384 or self.headers.get('Transfer-Encoding'):
-                return self.error(413,'Invalid request size')
+            if size is None: return self.error(411,'Request length is required')
             if self.headers.get_content_type()!='application/json': return self.error(415,'JSON is required')
             headers.update({'Content-Type':'application/json','Origin':self.server.upstream_origin})
             body=self.rfile.read(size)
+            if len(body)!=size: return self.error(400,'Request body ended early')
         try: link=self.server.pool.get_nowait()
         except queue.Empty: link=client.HTTPSConnection(self.server.upstream,timeout=4)
         try:
@@ -120,6 +162,7 @@ def main():
         server.upstream_origin=origin
         server.public_origin=(os.environ.get('BF_PUBLIC_ORIGIN') or os.environ.get('RENDER_EXTERNAL_URL','')).rstrip('/')
         server.pool=queue.LifoQueue(16)
+        server.release=release_id(os.environ.get('RENDER_GIT_COMMIT'))
         print(f'Battlefront Render gateway listening on {port}',flush=True)
         server.serve_forever()
 
