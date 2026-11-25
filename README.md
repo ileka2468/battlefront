@@ -2,7 +2,7 @@
 
 A React/Tailwind tactical viewer with a Python API, a shared SQLite player workspace, and a read-only feed from an actual DCS Caucasus campaign. The public viewer does not need a DCS client or a companion account.
 
-**Production:** [Battlefront on Render](https://battlefront-campaign.onrender.com/) · [20v20 recorded demo](https://battlefront-campaign.onrender.com/?replay=1) · [GitHub CI/CD](https://github.com/ileka2468/battlefront/actions)
+**Production:** [Battlefront on Render](https://battlefront-campaign.onrender.com/) · [20v20 recorded demo](https://battlefront-campaign.onrender.com/?replay=1) · [GitHub CI/CD](https://github.com/ileka2468/battlefront/actions) · [AI use log](ai-use-log.md)
 
 ## Run it after cloning
 
