@@ -4,6 +4,8 @@
 do
     local function install()
         local open, rename, remove = io.open, os.rename, os.remove
+        local getPlayerList = net and net.get_player_list
+        local getPlayerInfo = net and net.get_player_info
         local schedule, modelTime = timer.scheduleFunction, timer.getTime
         local baseByName, unitByName = Airbase.getByName, Unit.getByName
         local getZone = trigger.misc.getZone
@@ -24,6 +26,9 @@ do
         local zone = 'BATTLEFRONT_DELIVERY_BARRIER_V3'
         local name = 'BLUE_F16C_1'
         local baseName, baseID, blue = 'Mineralnye Vody', 26, 2
+        local groupID, unitID = 1401, 1402
+        local campaignProfile = false
+        local pilotPath = 'C:/DCS_configs/DCS.server1/Scripts/BattlefrontViperPilot.ucid'
         -- This private overlay replaces the game B slot with the virtual D. Do not treat stock B as D.
         local resource = 'weapons.missiles.AIM_120'
         local statuses = {APPLYING=true, READY=true, REJECTED=true, REVIEW=true}
@@ -143,10 +148,10 @@ do
             for _, country in pairs(side and side.country or {}) do
                 if tonumber(country.id) == 2 then
                     for _, group in pairs(country.plane and country.plane.group or {}) do
-                        if group.name == name and tonumber(group.groupId) == 1401 then
+                        if group.name == name and tonumber(group.groupId) == groupID then
                             local unit = group.units and group.units[1]
                             local point = group.route and group.route.points and group.route.points[1]
-                            return unit and #group.units == 1 and unit.name == name and tonumber(unit.unitId) == 1402
+                            return unit and #group.units == 1 and unit.name == name and tonumber(unit.unitId) == unitID
                                 and unit.type == 'F-16C_50' and unit.skill == 'Client'
                                 and point and tonumber(point.airdromeId) == baseID
                         end
@@ -183,11 +188,38 @@ do
             return warehouse, nil, base
         end
 
+        local function approvedPilotID()
+            local raw = read(pilotPath)
+            local approved = raw and raw:match('^([0-9a-fA-F]+)\n$')
+            if approved and #approved == 32 then return approved:lower() end
+        end
+
+        local function approvedPilotAtSlot()
+            -- The private recording retains its existing server access policy. On
+            -- the main campaign, never trust a player's display name or the jet's
+            -- callsign as a network identity.
+            if not campaignProfile then return true end
+            if not getPlayerList or not getPlayerInfo then return false end
+            local approved = approvedPilotID()
+            if not approved then return false end
+            local players = getPlayerList()
+            if type(players) ~= 'table' then return false end
+            for _, id in pairs(players) do
+                local slot = tostring(getPlayerInfo(id, 'slot') or '')
+                if slot == tostring(unitID) or slot == tostring(unitID) .. '_1' then
+                    local ucid = getPlayerInfo(id, 'ucid')
+                    return type(ucid) == 'string' and ucid:lower() == approved
+                end
+            end
+            return false
+        end
+
         local function setup()
             local unit = unitByName(name)
             if not unit or not unit:isExist() then return nil, 'wait' end
             local pilot = unit:getPlayerName()
             if type(pilot) ~= 'string' or pilot == '' then return nil, 'wait' end
+            if not approvedPilotAtSlot() then return nil, 'wait' end
             local group = unit:getGroup()
             if not group or group:getName() ~= name or unit:getTypeName() ~= 'F-16C_50'
                 or tonumber(unit:getCoalition()) ~= blue then return nil, 'invalid_setup' end
@@ -205,13 +237,16 @@ do
 
         local function process(now)
             if not signature() or overlayBytes == 0 then return end
-            if not matchesOverlay() then
+            if not matchesOverlay() or (campaignProfile and
+                    (not getPlayerList or not getPlayerInfo or not approvedPilotID())) then
                 withdrawCapability()
                 return
             end
             local stockKnown, eligible = pcall(function()
                 local warehouse = nativeWarehouse()
-                return warehouse and stock(warehouse) ~= nil
+                if not warehouse then return false end
+                local count = stock(warehouse)
+                return count ~= nil and (not campaignProfile or count == 0)
             end)
             local capabilityReady = false
             if stockKnown and eligible then
@@ -256,7 +291,8 @@ do
             if not publish(guardPath, guardTemp, marker, false) then return end
             if not reply(id, 'APPLYING', 0, -1, 'prewrite') then return end
             local fresh, recheck = pcall(stock, warehouse)
-            if read(requestPath) ~= request or not fresh or recheck ~= 0 or not matchesOverlay() then
+            if read(requestPath) ~= request or not fresh or recheck ~= 0 or not matchesOverlay()
+                    or not approvedPilotAtSlot() then
                 return reply(id, 'REVIEW', 0, -1, 'write_uncertain', true)
             end
 

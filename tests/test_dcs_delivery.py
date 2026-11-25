@@ -61,8 +61,8 @@ class DeliveryFixtures(unittest.TestCase):
             stamp = time.time() - age
             os.utime(self.capability, (stamp, stamp))
 
-    def store(self, *, enabled=True, account="demo-blue", catalog=None):
-        options = {"delivery_dir":self.lane, "delivery_account":account} if enabled else {}
+    def store(self, *, enabled=True, account="demo-blue", catalog=None, airfield=storage.DELIVERY_AIRFIELD):
+        options = {"delivery_dir":self.lane, "delivery_account":account, "delivery_airfield":airfield} if enabled else {}
         if catalog is None:
             catalog = json.loads((ROOT / "server/demo_catalog.json").read_text(encoding="utf-8"))
         return storage.WorkspaceStore(self.db, self.accounts_path, catalog, **options)
@@ -150,6 +150,62 @@ class DeliveryFixtures(unittest.TestCase):
                 self.assertFalse(self.ledger(store,"delivery_escrow"))
         self.pulse()
         self.assertEqual(store.get_state(session)["delivery"]["status"],"idle")
+
+    def test_vaziani_requires_exact_scope_and_persists_it(self):
+        live = self.store(airfield="Vaziani")
+        session = self.sign(live)
+        self.action(live,session,BUY)
+        for bad_lease in (b"BF3 VIPER_D_READY\n", b"BF3 VIPER_D_READY VAZIANI\r\n",
+                          b"BF3 VIPER_D_READY vaziani\n", b"BF3 VIPER_D_READY KOBULETI\n"):
+            self.pulse(bad_lease)
+            self.assertNotIn("delivery",live.get_state(session))
+            self.refusal(409,lambda: self.action(live,session,SEND))
+        self.assertFalse(self.request.exists())
+        self.assertFalse(self.ledger(live,"delivery_escrow"))
+        self.pulse(b"BF3 VIPER_D_READY VAZIANI\n")
+        for unsupported in ("Batumi", "VAZIANI", "Vaziani ", "", None):
+            bad = self.store(airfield=unsupported)
+            self.assertNotIn("delivery",bad.get_state(session))
+            self.refusal(403,lambda: self.action(bad,session,SEND))
+        original = self.store()
+        self.assertNotIn("delivery",original.get_state(session))
+        self.refusal(409,lambda: self.action(original,session,SEND))
+        self.assertEqual(live.get_state(session)["delivery"],
+            {"status":"idle","item":"AIM-120D","order_id":None,"airfield":"Vaziani"})
+        sent = self.action(live,session,SEND)["delivery"]
+        self.assertEqual(sent["airfield"],"Vaziani")
+        self.assertEqual(sent["status"],"pending")
+        order = sent["order_id"]
+        self.assertEqual(self.request.read_bytes(),f"BF3 {order} AIM-120D\n".encode("ascii"))
+        with live.connect() as db:
+            self.assertEqual(live._read(db)["delivery"]["airfield"],"Vaziani")
+        self.mark(order)
+        self.report("0"*32,"READY 0 1 verified")
+        self.assertEqual(self.store(airfield="Vaziani").get_state(session)["delivery"]["status"],"pending")
+        self.report(order,"READY 0 1 verified")
+        self.assertNotIn("delivery",self.store().get_state(session))
+        self.assertFalse(self.ledger(live,"delivery_ready"))
+        self.assertEqual(self.store(airfield="Vaziani").get_state(session)["delivery"],
+            {"status":"ready","item":"AIM-120D","order_id":order,"airfield":"Vaziani"})
+        self.assertEqual(self.inventory(live,session),(8,0))
+        self.assertEqual(len(self.ledger(live,"delivery_ready")),1)
+
+    def test_legacy_bf3_order_without_airfield_only_reconciles_in_legacy_profile(self):
+        default = self.store()
+        session = self.sign(default)
+        self.action(default,session,BUY)
+        order = self.action(default,session,SEND)["delivery"]["order_id"]
+        with default.connect(write=True) as db:
+            state = default._read(db)
+            del state["delivery"]["airfield"]
+            default._save(db,state)
+        self.mark(order)
+        self.report(order,"READY 0 1 verified")
+        self.pulse(b"BF3 VIPER_D_READY VAZIANI\n")
+        self.assertNotIn("delivery",self.store(airfield="Vaziani").get_state(session))
+        self.assertFalse(self.ledger(default,"delivery_ready"))
+        self.assertEqual(self.store().get_state(session)["delivery"],
+            {"status":"ready","item":"AIM-120D","order_id":order,"airfield":"Mineralnye Vody"})
 
     def test_expired_between_escrow_and_publication_returns_one_item(self):
         store = self.store()
@@ -358,12 +414,14 @@ class DeliveryFixtures(unittest.TestCase):
             file.unlink()
 
     @contextmanager
-    def daemon(self, port):
+    def daemon(self, port, airfield=None):
         origin = f"http://127.0.0.1:{port}"
         env = {key:value for key,value in os.environ.items() if not key.startswith("BF_")}
         env.update({"BF_WORKSPACE":"1","BF_BIND":"127.0.0.1","PORT":str(port),"BF_WORKSPACE_ORIGIN":origin,
                     "BF_WORKSPACE_DB":str(self.db),"BF_WORKSPACE_ACCOUNTS_FILE":str(self.accounts_path),
                     "BF_DCS_DELIVERY_DIR":str(self.lane),"BF_DCS_DELIVERY_ACCOUNT":"demo-blue"})
+        if airfield is not None:
+            env["BF_DCS_DELIVERY_AIRFIELD"] = airfield
         with (self.base/"http.log").open("ab") as log:
             proc=subprocess.Popen([sys.executable,str(ROOT/"web/server.py")],env=env,cwd=ROOT,stdout=log,stderr=log)
             try:
@@ -388,7 +446,8 @@ class DeliveryFixtures(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1",0))
             port=sock.getsockname()[1]
-        with self.daemon(port) as origin:
+        self.pulse(b"BF3 VIPER_D_READY VAZIANI\n")
+        with self.daemon(port, airfield="Vaziani") as origin:
             guest,professor,blue = (Browser(origin) for _ in range(3))
             self.assertNotIn("delivery",guest.state())
             guest.post(SEND,ITEM,expected=401)
@@ -398,6 +457,7 @@ class DeliveryFixtures(unittest.TestCase):
             professor.post(SEND,ITEM,expected=403)
             pilot_id = blue.login("demo-blue",self.passwords["demo-blue"])
             self.assertEqual(blue.state()["delivery"]["status"],"idle")
+            self.assertEqual(blue.state()["delivery"]["airfield"],"Vaziani")
             blue.post(BUY,ITEM)
             blue.post(SEND,ITEM,csrf=False,expected=403)
             blue.post(SEND,ITEM,headers={"Origin":"https://different.invalid"},expected=403)
@@ -407,7 +467,7 @@ class DeliveryFixtures(unittest.TestCase):
             self.assertEqual(blue.state()["players"][pilot_id]["points"],8)
             self.assertNotIn("AIM-120D",blue.state()["players"][pilot_id]["inventory"])
         self.report(order,"REVIEW 0 -1 interrupted")
-        with self.daemon(port):
+        with self.daemon(port, airfield="Vaziani"):
             self.assertEqual(blue.state()["delivery"]["status"],"review")
             self.assertEqual(blue.state()["players"][pilot_id]["points"],8)
             self.assertNotIn("AIM-120D",blue.state()["players"][pilot_id]["inventory"])

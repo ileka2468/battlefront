@@ -30,6 +30,10 @@ DELIVERY_RECEIPT = "battlefront_delivery.receipt"
 DELIVERY_GUARD = "battlefront_delivery.applying"
 DELIVERY_CAPABILITY = "battlefront_delivery.capability"
 DELIVERY_CAPABILITY_CONTENT = b"BF3 VIPER_D_READY\n"
+DELIVERY_AIRFIELD_CAPABILITIES = {
+    DELIVERY_AIRFIELD: DELIVERY_CAPABILITY_CONTENT,
+    "Vaziani": b"BF3 VIPER_D_READY VAZIANI\n",
+}
 DELIVERY_CAPABILITY_MAX_AGE = 10
 DELIVERY_PROFILE = "viper-d-recording"
 RECEIPT = re.compile(
@@ -90,16 +94,19 @@ def read_accounts(path):
 
 
 class WorkspaceStore:
-    def __init__(self, db_path, accounts_path, catalog, *, delivery_dir=None, delivery_account=None):
+    def __init__(self, db_path, accounts_path, catalog, *, delivery_dir=None, delivery_account=None,
+                 delivery_airfield=DELIVERY_AIRFIELD):
         self.path = Path(db_path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.accounts = read_accounts(accounts_path)
         self.by_id = {a["id"]: a for a in self.accounts.values()}
         self.catalog = dict(catalog)
         self.delivery_dir, self.delivery_actor = None, None
+        self.delivery_airfield = (delivery_airfield if isinstance(delivery_airfield, str)
+                                  and delivery_airfield in DELIVERY_AIRFIELD_CAPABILITIES else None)
         configured = self.accounts.get(delivery_account or "")
         spec = self.catalog.get(DELIVERY_ITEM, {})
-        if (configured and configured["side"] == DELIVERY_SIDE and delivery_dir
+        if (configured and configured["side"] == DELIVERY_SIDE and delivery_dir and self.delivery_airfield
                 and spec.get("coalition") == "BLUFOR" and "F-16C_50" in (spec.get("compatible") or [])
                 and spec.get("recording_profile") == DELIVERY_PROFILE):
             try:
@@ -233,10 +240,12 @@ class WorkspaceStore:
     def _delivery_eligible(self, actor, side):
         return self.delivery_actor is not None and actor == self.delivery_actor and side == DELIVERY_SIDE
 
-    @staticmethod
-    def _current_delivery(order):
+    def _current_delivery(self, order):
         # Earlier demo escrow entries are never reclassified as AIM-120D orders.
-        return bool(order and order.get("item") == DELIVERY_ITEM and order.get("protocol") == DELIVERY_VERSION)
+        # BF3 orders created before per-airfield recording were Mineralnye Vody only.
+        return bool(order and self.delivery_airfield and order.get("item") == DELIVERY_ITEM
+                    and order.get("protocol") == DELIVERY_VERSION
+                    and order.get("airfield", DELIVERY_AIRFIELD) == self.delivery_airfield)
 
     def _delivery_path(self, name):
         directory = self.delivery_dir
@@ -265,8 +274,11 @@ class WorkspaceStore:
         return value
 
     def _delivery_profile_ready(self):
+        expected = DELIVERY_AIRFIELD_CAPABILITIES.get(self.delivery_airfield)
+        if expected is None:
+            return False
         try:
-            return self._read_delivery_file(DELIVERY_CAPABILITY, max_age=DELIVERY_CAPABILITY_MAX_AGE) == DELIVERY_CAPABILITY_CONTENT
+            return self._read_delivery_file(DELIVERY_CAPABILITY, max_age=DELIVERY_CAPABILITY_MAX_AGE) == expected
         except (OSError, RuntimeError):
             return False
 
@@ -305,10 +317,9 @@ class WorkspaceStore:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
-    @staticmethod
-    def _delivery_view(order):
+    def _delivery_view(self, order):
         return {"status": order["status"] if order else "idle", "item": DELIVERY_ITEM,
-                "order_id": order["order_id"] if order else None, "airfield": DELIVERY_AIRFIELD}
+                "order_id": order["order_id"] if order else None, "airfield": self.delivery_airfield}
 
     def _finish_delivery(self, db, state, order, status, reason, before=None, after=None):
         if status == "rejected":
@@ -431,7 +442,8 @@ class WorkspaceStore:
                 del inventory[DELIVERY_ITEM]
                 player["planned_loadout"].pop(DELIVERY_ITEM, None)
             order = {"order_id": secrets.token_hex(16), "actor": actor, "item": DELIVERY_ITEM,
-                     "protocol": DELIVERY_VERSION, "status": "pending", "armed_at": None, "created_at": iso_now()}
+                     "protocol": DELIVERY_VERSION, "airfield": self.delivery_airfield,
+                     "status": "pending", "armed_at": None, "created_at": iso_now()}
             state["delivery"] = order
             self._save(db, state)
             self._record(db, actor, "delivery_escrow", {"order_id": order["order_id"],
