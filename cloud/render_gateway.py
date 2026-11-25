@@ -12,7 +12,8 @@ import mimetypes
 WEB = Path(__file__).resolve().parents[1] / 'web'
 MAX_REQUEST_BODY = 16384
 READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry'}
-WRITE = {'/api/workspace/login','/api/workspace/logout','/api/player/set_callsign','/api/requisition',
+WRITE = {'/api/workspace/login','/api/workspace/logout','/api/workspace/signup',
+         '/api/dcs/link/start','/api/dcs/link/finish','/api/player/set_callsign','/api/requisition',
          '/api/marketplace/list','/api/marketplace/buy','/api/marketplace/cancel','/api/armory/mount',
          '/api/operations/join','/api/operations/leave','/api/operations/propose',
          '/api/operations/command','/api/operations/launch','/api/dcs/deliver'}

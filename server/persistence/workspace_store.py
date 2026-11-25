@@ -1,5 +1,6 @@
 """Durable web companion state and a fixed, optional simulator delivery lane."""
 
+import base64
 import hashlib
 import hmac
 import json
@@ -21,6 +22,12 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 ACCOUNT_ID = re.compile(r"acct_[0-9a-f]{32}")
 PBKDF2_ITERATIONS = 600_000
 SESSION_SECONDS = 12 * 3600
+PAIR_CODE = re.compile(r"[A-Z2-7]{12}")
+PAIR_RECEIPT = re.compile(rb"BFPAIR1 ([A-Z2-7]{12}) ([0-9a-f]{32}) ([12])\n")
+PAIR_LIFETIME = 300
+PAIR_ROTATE_SECONDS = 10
+PAIR_SPOOL_SCAN_LIMIT = 128
+SIGNUP_LIMIT = 1000
 DELIVERY_ITEM = "AIM-120D"
 DELIVERY_SIDE = 2
 DELIVERY_VERSION = 3
@@ -50,6 +57,28 @@ class WorkspaceError(Exception):
 
 def credential(password, salt):
     return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), PBKDF2_ITERATIONS).hex()
+
+
+def private_location(raw, *, directory):
+    if not raw:
+        return None
+    try:
+        path = Path(raw)
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            return None
+        info = path.lstat()
+        check_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not check_type(info.st_mode):
+            return None
+        if os.name == "posix" and (stat.S_IMODE(info.st_mode) & 0o077 or info.st_uid != os.getuid()):
+            return None
+        return path
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def native_owner(ucid):
+    return hashlib.sha256(b"battlefront-dcs:" + ucid).hexdigest()
 
 
 def trim_text(value, label, maximum=100):
@@ -95,25 +124,32 @@ def read_accounts(path):
 
 class WorkspaceStore:
     def __init__(self, db_path, accounts_path, catalog, *, delivery_dir=None, delivery_account=None,
-                 delivery_airfield=DELIVERY_AIRFIELD):
+                 delivery_airfield=DELIVERY_AIRFIELD, link_dir=None, linked_delivery_pilot_file=None,
+                 linked_delivery_merits=0):
         self.path = Path(db_path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.accounts = read_accounts(accounts_path)
         self.by_id = {a["id"]: a for a in self.accounts.values()}
         self.catalog = dict(catalog)
-        self.delivery_dir, self.delivery_actor = None, None
+        self.link_dir = private_location(link_dir, directory=True)
+        self.delivery_dir, self.configured_delivery_actor = None, None
+        self.linked_delivery_pilot_file = None
+        self.linked_delivery_merits = integer(linked_delivery_merits, "linked demo merits", 0, 100)
         self.delivery_airfield = (delivery_airfield if isinstance(delivery_airfield, str)
                                   and delivery_airfield in DELIVERY_AIRFIELD_CAPABILITIES else None)
         configured = self.accounts.get(delivery_account or "")
         spec = self.catalog.get(DELIVERY_ITEM, {})
-        if (configured and configured["side"] == DELIVERY_SIDE and delivery_dir and self.delivery_airfield
+        if linked_delivery_pilot_file and self.link_dir and self.delivery_airfield == "Vaziani":
+            self.linked_delivery_pilot_file = private_location(linked_delivery_pilot_file, directory=False)
+        static_actor = (configured and configured["side"] == DELIVERY_SIDE and not linked_delivery_pilot_file)
+        if ((static_actor or self.linked_delivery_pilot_file) and delivery_dir and self.delivery_airfield
                 and spec.get("coalition") == "BLUFOR" and "F-16C_50" in (spec.get("compatible") or [])
                 and spec.get("recording_profile") == DELIVERY_PROFILE):
             try:
                 directory = Path(delivery_dir)
                 if directory.is_absolute() and directory.resolve(strict=True).is_dir():
                     self.delivery_dir = directory.resolve(strict=True)
-                    self.delivery_actor = configured["id"]
+                    self.configured_delivery_actor = configured["id"] if static_actor else None
             except (OSError, RuntimeError, ValueError):
                 pass   # Intentionally disabled when operator configuration is unavailable.
         # Initialize the SQLite file with owner-only access, including on a new installation.
@@ -132,10 +168,18 @@ class WorkspaceStore:
                 CREATE TABLE IF NOT EXISTS workspace_ledger (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL,
                     occurred TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS workspace_signups (
+                    id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, callsign TEXT NOT NULL,
+                    salt TEXT NOT NULL, password_hash TEXT NOT NULL,
+                    side INTEGER, dcs_owner TEXT UNIQUE,
+                    CHECK ((side IS NULL AND dcs_owner IS NULL)
+                        OR (side IS NOT NULL AND side IN (1,2) AND dcs_owner IS NOT NULL)));
+                CREATE TABLE IF NOT EXISTS workspace_pairing (
+                    actor TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, issued INTEGER NOT NULL, expires INTEGER NOT NULL);
             """)
             db.execute("INSERT OR IGNORE INTO workspace_state VALUES (1,?)",
                 (json.dumps(dict(players={}, listings={}, trades=[], operations={}, previous_plans=[], commanders={})),))
-        if self.delivery_actor:
+        if self.delivery_dir:
             self.reconcile_delivery()
 
     @contextmanager
@@ -180,36 +224,72 @@ class WorkspaceStore:
             "stats": {"a2a_kills": 0, "a2g_kills": 0, "sorties": 0, "losses": 0},
         }
 
+    def signup(self, username, password):
+        if not self.link_dir:
+            raise WorkspaceError("Account signup is not enabled.", 404)
+        username = trim_text(username, "username", 24).lower()
+        if not USERNAME.fullmatch(username) or len(username) < 3:
+            raise WorkspaceError("Use 3–24 letters, numbers, dots, underscores or hyphens.")
+        if not isinstance(password, str) or not 12 <= len(password) <= 128 or not password.strip():
+            raise WorkspaceError("Use a password between 12 and 128 characters.")
+        try:
+            salt = secrets.token_hex(16)
+            digest = credential(password, salt)
+        except UnicodeEncodeError:
+            raise WorkspaceError("Invalid password.") from None
+        actor = "acct_" + secrets.token_hex(16)
+        with self.connect(write=True) as db:
+            if username in self.accounts or db.execute(
+                "SELECT 1 FROM workspace_signups WHERE username=?", (username,)
+            ).fetchone():
+                raise WorkspaceError("That username is unavailable.", 409)
+            if db.execute("SELECT COUNT(*) FROM workspace_signups").fetchone()[0] >= SIGNUP_LIMIT:
+                raise WorkspaceError("Signup capacity reached.", 503)
+            db.execute("INSERT INTO workspace_signups VALUES (?,?,?,?,?,NULL,NULL)",
+                       (actor, username, username.replace(".", "-"), salt, digest))
+            self._record(db, actor, "signup", {})
+            return self._create_session(db, actor, digest)
+
+    def _create_session(self, db, actor, digest):
+        now = int(time.time())
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        db.execute("DELETE FROM workspace_sessions WHERE expires <= ?", (now,))
+        db.execute("""DELETE FROM workspace_sessions WHERE actor=? AND hash NOT IN (
+                      SELECT hash FROM workspace_sessions WHERE actor=? ORDER BY expires DESC, rowid DESC LIMIT 7)""",
+                   (actor, actor))
+        db.execute("INSERT INTO workspace_sessions VALUES (?,?,?,?,?)",
+                   (self.token_hash(token), actor, digest, csrf, now + SESSION_SECONDS))
+        return token
+
     def login(self, username, password):
         username = trim_text(username, "account", 32).lower()
         if not isinstance(password, str) or not 1 <= len(password) <= 256 or not USERNAME.fullmatch(username):
             raise WorkspaceError("Invalid account credentials.", 401)
         account = self.accounts.get(username)
+        if not account:
+            with self.connect() as db:
+                row = db.execute("SELECT * FROM workspace_signups WHERE username=?", (username,)).fetchone()
+                account = dict(row) if row else None
         # Unknown usernames take the same password hashing path as known usernames.
         nonce = account["salt"] if account else "0" * 32
         expected = account["password_hash"] if account else "0" * 64
-        valid = hmac.compare_digest(credential(password, nonce), expected)
+        try:
+            valid = hmac.compare_digest(credential(password, nonce), expected)
+        except UnicodeEncodeError:
+            valid = False
         if not (valid and account):
             raise WorkspaceError("Invalid account credentials.", 401)
-        actor, expires = account["id"], int(time.time()) + SESSION_SECONDS
-        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        actor = account["id"]
         with self.connect(write=True) as db:
             state = self._read(db)
             previous = state["players"].get(actor)
-            if previous and previous["side"] != account["side"]:
+            if "dcs_owner" not in account and previous and previous["side"] != account["side"]:
                 raise WorkspaceError("Account coalition conflicts with existing inventory. Ask the site administrator.", 403)
-            if not previous:
+            if "dcs_owner" not in account and not previous:
                 self._initialize_player(state, account)
                 self._save(db, state)
                 self._record(db, actor, "provision", {"side": account["side"], "merits": state["players"][actor]["points"]})
-            db.execute("DELETE FROM workspace_sessions WHERE expires <= ?", (int(time.time()),))
-            # Bound active sessions per identity without invalidating other browsers on every sign-in.
-            db.execute("""DELETE FROM workspace_sessions WHERE actor=? AND hash NOT IN (
-                          SELECT hash FROM workspace_sessions WHERE actor=? ORDER BY expires DESC, rowid DESC LIMIT 7)""",
-                       (actor, actor))
-            db.execute("INSERT INTO workspace_sessions VALUES (?,?,?,?,?)",
-                       (self.token_hash(token), actor, expected, csrf, expires))
-        return token
+            return self._create_session(db, actor, expected)
 
     @staticmethod
     def token_hash(token):
@@ -221,13 +301,16 @@ class WorkspaceStore:
         with self.connect() as db:
             row = db.execute("SELECT * FROM workspace_sessions WHERE hash=? AND expires>?",
                              (self.token_hash(token), int(time.time()))).fetchone()
-        if not row:
-            return None
-        account = self.by_id.get(row["actor"])
+            if not row:
+                return None
+            account = self.by_id.get(row["actor"])
+            if not account:
+                registered = db.execute("SELECT * FROM workspace_signups WHERE id=?", (row["actor"],)).fetchone()
+                account = dict(registered) if registered else None
         if not account or not hmac.compare_digest(account["password_hash"], row["revision"]):
             return None
         return {"actor": row["actor"], "side": account["side"], "csrf": row["csrf"], "hash": row["hash"],
-                "can_command": account["role"] in ("commander", "admin")}
+                "can_command": account.get("role") in ("commander", "admin"), "registered": "dcs_owner" in account}
 
     def check_health(self):
         with self.connect() as db:
@@ -237,8 +320,138 @@ class WorkspaceStore:
         with self.connect(write=True) as db:
             db.execute("DELETE FROM workspace_sessions WHERE hash=?", (self.token_hash(token),))
 
+    def _pending_signup(self, db, session):
+        if not self.link_dir or not session.get("registered"):
+            raise WorkspaceError("DCS linking is not available for this account.", 403)
+        now = int(time.time())
+        if not db.execute("SELECT 1 FROM workspace_sessions WHERE hash=? AND actor=? AND expires>?",
+                          (session["hash"], session["actor"], now)).fetchone():
+            raise WorkspaceError("Sign in to link your DCS account.", 401)
+        row = db.execute("SELECT * FROM workspace_signups WHERE id=?", (session["actor"],)).fetchone()
+        if not row or row["dcs_owner"]:
+            raise WorkspaceError("This account is already linked.", 409)
+        return row, now
+
+    def start_link(self, session):
+        code = base64.b32encode(secrets.token_bytes(8)).decode("ascii")[:12]
+        with self.connect(write=True) as db:
+            row, now = self._pending_signup(db, session)
+            prior = db.execute("SELECT issued FROM workspace_pairing WHERE actor=?", (row["id"],)).fetchone()
+            if prior and now - prior["issued"] < PAIR_ROTATE_SECONDS:
+                raise WorkspaceError("Wait a few seconds before requesting another code.", 429)
+            db.execute("""INSERT INTO workspace_pairing VALUES (?,?,?,?) ON CONFLICT(actor)
+                          DO UPDATE SET code_hash=excluded.code_hash, issued=excluded.issued, expires=excluded.expires""",
+                       (row["id"], self.token_hash(code), now, now + PAIR_LIFETIME))
+        self._prune_pairing_spool(now)
+        return {"success": True, "code": code, "expires": now + PAIR_LIFETIME}
+
+    def _prune_pairing_spool(self, now):
+        if not private_location(self.link_dir, directory=True):
+            return
+        # Discard only expired, name-constrained local evidence. Bounded work
+        # keeps signup/link independent of an operator's unrelated files.
+        try:
+            with os.scandir(self.link_dir) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= PAIR_SPOOL_SCAN_LIMIT:
+                        break
+                    if not re.fullmatch(r"[A-Z2-7]{12}\.pair(?:\.tmp)?", entry.name):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if (stat.S_ISREG(info.st_mode)
+                                and (os.name != "posix" or info.st_uid == os.getuid())
+                                and now - info.st_mtime > 2 * PAIR_LIFETIME):
+                            Path(entry.path).unlink()
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+    def _pair_receipt(self, code, issued, now):
+        if not private_location(self.link_dir, directory=True):
+            raise WorkspaceError("The DCS linking bridge is offline.", 503)
+        path = self.link_dir / (code + ".pair")
+        try:
+            if path.is_symlink():
+                raise OSError("Unexpected pairing receipt")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode)
+                        or (os.name == "posix" and info.st_uid != os.getuid())
+                        or not issued - 1 <= info.st_mtime <= now + 1):
+                    raise OSError("Unexpected pairing receipt")
+                receipt = PAIR_RECEIPT.fullmatch(stream.read(64))
+                if not receipt or receipt[1].decode("ascii") != code:
+                    raise OSError("Unexpected pairing receipt")
+        except FileNotFoundError:
+            return None, None, None
+        except OSError:
+            raise WorkspaceError("No valid reply from DCS. Generate a new code.", 409) from None
+        return path, native_owner(receipt[2]), int(receipt[3])
+
+    def _linked_delivery_owner(self):
+        path = private_location(self.linked_delivery_pilot_file, directory=False)
+        if path is None:
+            return None
+        try:
+            with path.open("rb") as stream:
+                value = stream.read(34)
+        except OSError:
+            return None
+        return native_owner(value[:-1]) if re.fullmatch(rb"[0-9a-f]{32}\n", value) else None
+
+    def finish_link(self, session, raw_code):
+        code = raw_code.strip().upper() if isinstance(raw_code, str) else ""
+        if not PAIR_CODE.fullmatch(code):
+            raise WorkspaceError("Enter the exact code displayed by the Companion.")
+        with self.connect(write=True) as db:
+            row, now = self._pending_signup(db, session)
+            challenge = db.execute("SELECT * FROM workspace_pairing WHERE actor=?", (row["id"],)).fetchone()
+            if not challenge or not hmac.compare_digest(challenge["code_hash"], self.token_hash(code)):
+                raise WorkspaceError("That is not your current link code.", 409)
+            if challenge["expires"] <= now:
+                raise WorkspaceError("That code expired. Generate a new code.", 410)
+            path, owner, side = self._pair_receipt(code, challenge["issued"], now)
+            if path is None:
+                return {"success": True, "status": "waiting"}
+            duplicate = db.execute("SELECT 1 FROM workspace_signups WHERE dcs_owner=?", (owner,)).fetchone()
+            db.execute("DELETE FROM workspace_pairing WHERE actor=?", (row["id"],))
+            if not duplicate:
+                award = (self.linked_delivery_merits if self.delivery_dir and side == DELIVERY_SIDE
+                         and owner == self._linked_delivery_owner() else 0)
+                db.execute("UPDATE workspace_signups SET side=?, dcs_owner=? WHERE id=?", (side, owner, row["id"]))
+                state = self._read(db)
+                self._initialize_player(state, {**dict(row), "side": side, "starter_merits": award})
+                self._save(db, state)
+                self._record(db, row["id"], "dcs_linked", {"side": side, "merits": award})
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # A committed challenge is never usable again, even if cleanup fails.
+            pass
+        if duplicate:
+            raise WorkspaceError("That DCS account is already linked. Sign in to its Companion account.", 409)
+        return {"success": True, "status": "linked"}
+
+    def _delivery_actor(self, db):
+        if not self.delivery_dir:
+            return None
+        if self.configured_delivery_actor:
+            return self.configured_delivery_actor
+        owner = self._linked_delivery_owner()
+        if owner:
+            row = db.execute("SELECT id FROM workspace_signups WHERE dcs_owner=? AND side=2", (owner,)).fetchone()
+            return row["id"] if row else None
+        return None
+
     def _delivery_eligible(self, actor, side):
-        return self.delivery_actor is not None and actor == self.delivery_actor and side == DELIVERY_SIDE
+        if not actor or side != DELIVERY_SIDE or not self.delivery_dir:
+            return False
+        with self.connect() as db:
+            return actor == self._delivery_actor(db)
 
     def _current_delivery(self, order):
         # Earlier demo escrow entries are never reclassified as AIM-120D orders.
@@ -337,13 +550,13 @@ class WorkspaceStore:
 
     def reconcile_delivery(self):
         """Settle a private receipt or publish one never-attempted staged request."""
-        if not self.delivery_actor:
+        if not self.delivery_dir:
             return
         claim = None
         with self.connect(write=True) as db:
             state = self._read(db)
             order = state.get("delivery")
-            if not self._current_delivery(order) or order["actor"] != self.delivery_actor or order["status"] != "pending":
+            if not self._current_delivery(order) or order["actor"] != self._delivery_actor(db) or order["status"] != "pending":
                 return
             try:
                 request = self._read_delivery_file(DELIVERY_REQUEST)
@@ -395,7 +608,7 @@ class WorkspaceStore:
             with self.connect(write=True) as db:
                 state = self._read(db)
                 order = state.get("delivery")
-                if (not self._current_delivery(order) or order["actor"] != self.delivery_actor
+                if (not self._current_delivery(order) or order["actor"] != self._delivery_actor(db)
                         or order["order_id"] != claim or order["status"] != "pending"):
                     return
                 try:
@@ -470,7 +683,9 @@ class WorkspaceStore:
         for row in listings:
             row["seller_callsign"] = players[row["seller"]]["callsign"]
         trades = [row for row in state["trades"] if row["side"] == side]
-        result = {"workspace": {"mode": "production", "player_id": actor, "authenticated": actor is not None,
+        result = {"workspace": {"mode": "production", "player_id": actor if side in (1, 2) else None,
+                              "authenticated": actor is not None, "signup_enabled": self.link_dir is not None,
+                              "link_required": bool(session and session.get("registered") and side is None),
                               "csrf": session["csrf"] if session else None,
                               "can_command": session["can_command"] if session else False},
                 "currency_name": "Companion Merits", "currency_symbol": "CM", "munition_catalog": self.catalog,
@@ -486,7 +701,7 @@ class WorkspaceStore:
     def get_campaign(self, session, sectors, projection):
         with self.connect() as db:
             state = self._read(db)
-        side = str(session["side"]) if session else None
+        side = str(session["side"]) if session and session["side"] in (1, 2) else None
         commanders = state["commanders"]
         return {
             "operations": {side: state["operations"][side]} if side in state["operations"] else {},

@@ -206,7 +206,7 @@ function Standings({players}) {
   return <section id="leaderboardTab"><Heading title="Pilot standings" note="Recorded stats for companion pilots. Personal merit balances are private."/><Table headers={['Rank','Pilot','Coalition','Air kills','Ground kills','Assists','Sorties','Merits']} rows={rows.map(([id,p],i)=>[id,[`#${i+1}`,p.callsign,<Side side={p.side}/>,p.stats?.a2a_kills||0,p.stats?.a2g_kills||0,p.stats?.datalink_assists||0,p.stats?.sorties||0,p.points==null?'—':p.points+' CM']])}/></section>;
 }
 
-function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,action}) {
+function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,signup,startLink,finishLink,action}) {
   const [item,setItem]=useState(modal.item||Object.keys(player.inventory||{}).find(k=>player.inventory[k]>0)||'');
   const [qty,setQty]=useState(1);
   const [price,setPrice]=useState(6);
@@ -215,14 +215,20 @@ function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,action}
   const [sector,setSector]=useState('');
   const [username,setUsername]=useState('');
   const [password,setPassword]=useState('');
-  const titles={login:'Sign in to the companion',profile:'Edit callsign',pilot:'Choose a local demo callsign',sell:'Create sell order',operation:'Propose flight target'};
-  const buttons={login:'Sign in',profile:'Save callsign',pilot:'Set callsign',sell:'Publish listing',operation:'Propose target'};
+  const [pairCode,setPairCode]=useState('');
+  const titles={login:'Sign in to the companion',signup:'Create a Companion account',link:'Link your DCS account',profile:'Edit callsign',pilot:'Choose a local demo callsign',sell:'Create sell order',operation:'Propose flight target'};
+  const buttons={login:'Sign in',signup:'Create account',link:pairCode?'Check link':'Get one-time code',profile:'Save callsign',pilot:'Set callsign',sell:'Publish listing',operation:'Propose target'};
   useEffect(()=>{const onKey=e=>{if(e.key==='Escape'&&!busy)close();};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[close,busy]);
   async function submit(e) {
     e.preventDefault();
     if(busy) return;
     let done;
     if(modal.type==='login') done=await login(username,password);
+    if(modal.type==='signup') done=await signup(username,password);
+    if(modal.type==='link') {
+      if (pairCode) done=await finishLink(pairCode);
+      else setPairCode(await startLink()||'');
+    }
     if(modal.type==='pilot'||modal.type==='profile') done=await savePilot(callsign,+side);
     if(modal.type==='sell') done=await action('/api/marketplace/list',{munition:item,quantity:+qty,price_points:+price},'Sell order posted.');
     if(modal.type==='operation') done=await action('/api/operations/propose',{side:player.side,target_sector:sector},'Target proposed.');
@@ -232,10 +238,22 @@ function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,action}
     <div role="dialog" aria-modal="true" aria-labelledby="modal-title" className="w-full max-w-lg border border-line bg-paper shadow-xl">
       <form onSubmit={submit} className="grid gap-4 p-5">
         <div className="flex items-center justify-between"><h2 className="text-xl font-semibold" id="modal-title">{titles[modal.type]}</h2><Btn aria-label="Close dialog" onClick={close} disabled={busy}>×</Btn></div>
-        {modal.type==='login'&&<>
-          <p className="text-sm text-muted">Use your assigned Battlefront companion account, not your DCS credentials.</p>
-          <label className="bf-label">Username<input className="bf-field" value={username} onChange={e=>setUsername(e.target.value)} required autoFocus autoComplete="username" autoCapitalize="none" spellCheck={false}/></label>
-          <label className="bf-label">Password<input className="bf-field" type="password" value={password} onChange={e=>setPassword(e.target.value)} required autoComplete="current-password"/></label>
+        {(modal.type==='login'||modal.type==='signup')&&<>
+          <p className="text-sm text-muted">{modal.type==='signup'?'Choose a new Companion password. You’ll link DCS in the next step.':'Use your Battlefront Companion account, not your DCS credentials.'}</p>
+          <label className="bf-label">Username<input className="bf-field" value={username} onChange={e=>setUsername(e.target.value)} required minLength={modal.type==='signup'?3:undefined} maxLength={modal.type==='signup'?24:32} autoFocus autoComplete="username" autoCapitalize="none" spellCheck={false}/></label>
+          <label className="bf-label">Password<input className="bf-field" type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={modal.type==='signup'?12:undefined} maxLength={modal.type==='signup'?128:256} autoComplete={modal.type==='signup'?'new-password':'current-password'}/></label>
+        </>}
+        {modal.type==='link'&&<>
+          <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
+            <li>Join this Battlefront mission in DCS and select a pilot slot.</li>
+            <li>Open DCS multiplayer chat. Enter the command below.</li>
+            <li>Return here and choose <strong>Check link</strong>.</li>
+          </ol>
+          {pairCode&&<div className="grid gap-2 border border-line bg-panel p-3">
+            <code className="select-all font-mono text-sm" aria-label="One-time DCS command">-bf-link {pairCode}</code>
+            <small className="text-muted">The link code is valid for five minutes and can be used once.</small>
+            <Btn onClick={async()=>{const code=await startLink();if(code)setPairCode(code);}} disabled={busy} className="justify-self-start">Generate a new code</Btn>
+          </div>}
         </>}
         {(modal.type==='pilot'||modal.type==='profile')&&<>
           <p className="text-sm text-muted">{modal.type==='profile'?'Your pilot account and coalition stay the same.':'This callsign is only for the local demo.'}</p>
@@ -340,9 +358,35 @@ function App() {
       await request('/api/workspace/login',{username:username.trim(),password});
       const stored=await refresh();
       if(!stored?.workspace?.authenticated) throw Error('Signed in, but the pilot workspace could not be loaded. Reload to retry.');
+      if(stored.workspace.link_required){setModal({type:'link'});return false;}
       alert('Signed in to Battlefront.');
       return true;
     } catch(e){alert(e.message,true);return false;} finally{setBusy(false);}
+  }
+  async function signup(username,password){
+    setBusy(true);
+    try{
+      await request('/api/workspace/signup',{username:username.trim(),password});
+      const stored=await refresh();
+      if(!stored?.workspace?.link_required) throw Error('Account created. Sign in again to link your DCS account.');
+      setModal({type:'link'});
+      return false;
+    }catch(e){alert(e.message,true);return false;}finally{setBusy(false);}
+  }
+  async function startLink(){
+    setBusy(true);
+    try{return (await request('/api/dcs/link/start',{},workspace.csrf)).code;}
+    catch(e){alert(e.message,true);return '';}finally{setBusy(false);}
+  }
+  async function finishLink(code){
+    setBusy(true);
+    try{
+      const result=await request('/api/dcs/link/finish',{code},workspace.csrf);
+      if(result.status==='waiting'){alert('Waiting for DCS. Send the command from your occupied pilot slot, then check again.');return false;}
+      const stored=await refresh();
+      if(!stored?.workspace?.player_id) throw Error('DCS approved the link. Reload to see your pilot account.');
+      alert('DCS account linked.');return true;
+    }catch(e){alert(e.message,true);return false;}finally{setBusy(false);}
   }
   async function logout(){
     if(!production||!workspace.csrf) return;
@@ -382,7 +426,8 @@ function App() {
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-panel px-4 py-3 sm:px-7">
         <div><span className="eyebrow">{production?'Campaign workspace':localDemo?'Local demo workspace':'Campaign spectator'}</span><div id="workspaceName" className="font-semibold">{title}</div></div>
         <div className="flex flex-wrap items-center gap-3">
-          {production&&!pilotId&&<Btn kind="primary" onClick={()=>setModal({type:'login'})}>Sign in</Btn>}
+          {production&&!workspace.authenticated&&<><Btn kind={workspace.signup_enabled?'outline':'primary'} onClick={()=>setModal({type:'login'})}>Sign in</Btn>{workspace.signup_enabled&&<Btn kind="primary" onClick={()=>setModal({type:'signup'})}>Sign up</Btn>}</>}
+          {production&&workspace.link_required&&<><Btn kind="primary" onClick={()=>setModal({type:'link'})}>Link DCS account</Btn><Btn onClick={logout} disabled={busy}>Sign out</Btn></>}
           {production&&pilotId&&<><Btn onClick={()=>setModal({type:'profile'})} aria-label="Edit callsign" disabled={busy}>{player.callsign}</Btn><Btn onClick={logout} disabled={busy}>Sign out</Btn></>}
           {localDemo&&<Btn onClick={()=>setModal({type:'pilot'})} aria-label={pilotId?'Change callsign':'Choose callsign'}>{pilotId?player.callsign:'Choose callsign'}</Btn>}
           {pilotId&&<><Side side={player.side}/><strong className="font-mono text-xs" id="meritsValue">{player.points} CM</strong></>}
@@ -392,7 +437,7 @@ function App() {
       <Theater observation={live}/>
       <main className="min-w-0 px-3 py-4 sm:px-6 sm:py-6">
         <Airspace visible={section==='tacview'}/>
-        {production&&!pilotId&&['armory','requisition','marketplace'].includes(section)&&<div className="mb-4 border border-line bg-panel p-4 text-sm"><Btn onClick={()=>setModal({type:'login'})}>Sign in</Btn> to use your personal inventory and coalition exchange.</div>}
+        {production&&!pilotId&&['armory','requisition','marketplace'].includes(section)&&<div className="mb-4 border border-line bg-panel p-4 text-sm"><Btn onClick={()=>setModal({type:workspace.link_required?'link':'login'})}>{workspace.link_required?'Link your DCS account':'Sign in'}</Btn> to use your personal inventory and coalition exchange.</div>}
         {section==='operations'&&<Operations {...common}/>}
         {section==='armory'&&<Armory {...common} catalog={catalog} delivery={delivery}/>}
         {section==='requisition'&&<Depot {...common} catalog={catalog}/>}
@@ -402,7 +447,7 @@ function App() {
       </main>
       <footer className="border-t border-line px-4 py-3 font-mono text-[10px] text-muted sm:px-7">Companion Merits are separate from the DCS coalition treasury.</footer>
     </div>
-    {modal&&<Modal key={modal.type+'-'+(modal.item||'')} modal={modal} close={()=>setModal(null)} {...common} catalog={catalog} savePilot={savePilot} login={login} busy={busy}/>}
+    {modal&&<Modal key={modal.type+'-'+(modal.item||'')} modal={modal} close={()=>setModal(null)} {...common} catalog={catalog} savePilot={savePilot} login={login} signup={signup} startLink={startLink} finishLink={finishLink} busy={busy}/>}
     {notice&&<div className={'fixed right-4 bottom-4 z-50 max-w-[min(420px,90vw)] border bg-paper p-3 text-sm shadow-lg '+(notice.error?'border-red-500':'border-emerald-700')} role={notice.error?'alert':'status'}>{notice.text}<button className="ml-4 cursor-pointer text-muted" type="button" aria-label="Dismiss notification" onClick={()=>setNotice(null)}>×</button></div>}
   </div>;
 }
