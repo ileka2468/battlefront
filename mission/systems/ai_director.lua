@@ -34,8 +34,8 @@ Director.researchReadyAt = {}
 Director.censusLogAt = {}
 
 Director.config = {
-    maxCoalitionAircraft = 10, -- Includes active human and non-director aircraft
-    respawnCooldown = 90,        -- 90s replacement scramble
+    maxCoalitionAircraft = 15, -- Includes active human and non-director aircraft
+    respawnCooldown = 600,       -- 10m CAP air-superiority window; instant support turnaround
     capOrbitAltitude = 6500,     -- FL210
     strikeIngressSpeed = 240,    -- ~470 kts
     heloIngressSpeed = 65,       -- ~130 kts
@@ -49,30 +49,25 @@ end
 -- 1. QUADRANT STAGING BASES & PATROL ANCHORS (Contention Multi-Front Doctrine)
 -- ------------------------------------------------------------------------------
 Director.QUADRANT_STAGING = {
-    -- Quadrant 1: North-West (REDFOR Coastal & Kuban Foothills)
     ["NW"] = {
-        [SIDE_RED]  = { x = -7349,   z = 293712, heading = 3.14, name = "Krymsk Airbase" },
-        [SIDE_BLUE] = { x = -60000,  z = 310000, heading = 0.8,  name = "NW Offshore Ingress" }
+        [SIDE_RED]  = { x = -7349,   z = 293712, heading = 3.14, airdromeId = 24, airbaseName = "Krymsk", name = "Krymsk Airbase" },
+        [SIDE_BLUE] = { x = -165163, z = 460901, heading = 5.5,  airdromeId = 18, airbaseName = "Sochi-Adler", name = "Sochi-Adler Airbase" }
     },
-    -- Quadrant 2: North-East (REDFOR Central Plains & Mountain Approaches)
     ["NE"] = {
-        [SIDE_RED]  = { x = -52089,  z = 707418, heading = 3.8,  name = "Mineralnye Vody Airbase" },
-        [SIDE_BLUE] = { x = -160000, z = 720000, heading = 0.8,  name = "NE Mountain Pass Ingress" }
+        [SIDE_RED]  = { x = -52089,  z = 707418, heading = 3.8,  airdromeId = 26, airbaseName = "Mineralnye Vody", name = "Mineralnye Vody Airbase" },
+        [SIDE_BLUE] = { x = -281903, z = 648379, heading = 0.8,  airdromeId = 21, airbaseName = "Senaki-Kolkhi", name = "Senaki-Kolkhi Airbase" }
     },
-    -- Quadrant 3: South-West (BLUFOR Coastal & Abkhazia Pass)
     ["SW"] = {
-        [SIDE_BLUE] = { x = -165163, z = 460901, heading = 5.5,  name = "Sochi-Adler Airbase" },
-        [SIDE_RED]  = { x = -110000, z = 410000, heading = 2.4,  name = "SW Coastal Ridge Ingress" }
+        [SIDE_BLUE] = { x = -165163, z = 460901, heading = 5.5,  airdromeId = 18, airbaseName = "Sochi-Adler", name = "Sochi-Adler Airbase" },
+        [SIDE_RED]  = { x = -7349,   z = 293712, heading = 3.14, airdromeId = 24, airbaseName = "Krymsk", name = "Krymsk Airbase" }
     },
-    -- Quadrant 4: South-East (BLUFOR Central Georgia & Valley Approaches)
     ["SE"] = {
-        [SIDE_BLUE] = { x = -281903, z = 648379, heading = 0.8,  name = "Senaki-Kolkhi Airbase" },
-        [SIDE_RED]  = { x = -190000, z = 670000, heading = 3.9,  name = "SE Roki Pass Ingress" }
+        [SIDE_BLUE] = { x = -281903, z = 648379, heading = 0.8,  airdromeId = 21, airbaseName = "Senaki-Kolkhi", name = "Senaki-Kolkhi Airbase" },
+        [SIDE_RED]  = { x = -52089,  z = 707418, heading = 3.8,  airdromeId = 26, airbaseName = "Mineralnye Vody", name = "Mineralnye Vody Airbase" }
     },
-    -- Central Contested Frontline Meridian
     ["CENTER"] = {
-        [SIDE_RED]  = { x = -27625,  z = 457047, heading = 3.14, name = "Maykop Airbase" },
-        [SIDE_BLUE] = { x = -195650, z = 515898, heading = 0.8,  name = "Gudauta Airbase" }
+        [SIDE_RED]  = { x = -27625,  z = 457047, heading = 3.14, airdromeId = 23, airbaseName = "Maykop-Khanskaya", name = "Maykop Airbase" },
+        [SIDE_BLUE] = { x = -195650, z = 515898, heading = 0.8,  airdromeId = 19, airbaseName = "Gudauta", name = "Gudauta Airbase" }
     }
 }
 
@@ -95,7 +90,27 @@ Director.QUADRANT_PATROLS = {
 function Director.GetStaging(side, quadrant)
     quadrant = quadrant or (side == SIDE_BLUE and "SW" or "NE")
     local quadData = Director.QUADRANT_STAGING[quadrant] or Director.QUADRANT_STAGING["SW"]
-    return quadData[side] or { x = -200000, z = 500000, heading = 0.78 }
+    local entry = quadData[side] or { x = -165163, z = 460901, heading = 5.5, airdromeId = 18, airbaseName = "Sochi-Adler", name = "Sochi-Adler Airbase" }
+    local resolved = { x = entry.x, z = entry.z, heading = entry.heading, airdromeId = entry.airdromeId, name = entry.name, alt = 0 }
+    if Airbase and Airbase.getByName and entry.airbaseName then
+        local ab = Airbase.getByName(entry.airbaseName)
+        if ab and ab:isExist() and ab:getCoalition() == side then
+            local pt = ab:getPoint()
+            resolved.x, resolved.z, resolved.alt = pt.x, pt.z, pt.y or 0
+            resolved.airdromeId = ab:getID()
+        elseif coalition and coalition.getAirbases then
+            for _, cand in ipairs(coalition.getAirbases(side) or {}) do
+                if cand and cand:isExist() and cand:getDesc().category == Airbase.Category.AIRDROME then
+                    local pt = cand:getPoint()
+                    resolved.x, resolved.z, resolved.alt = pt.x, pt.z, pt.y or 0
+                    resolved.airdromeId = cand:getID()
+                    resolved.name = cand:getName()
+                    break
+                end
+            end
+        end
+    end
+    return resolved
 end
 
 -- ------------------------------------------------------------------------------
@@ -591,18 +606,19 @@ function Director.SelectTargetSector(role, side, preferredQuadrant)
         if not targetQuad or sec.quadrant == targetQuad then
             local score = 0
             if role == "LOGISTICS" then
-                if sec.side == enemySide and sec.status == "HOLDING" then
-                    score = 120
-                elseif sec.side == side and (sec.underAttack or sec.status == "DEFENDED") then
-                    score = 60
+                if sec.status == "NEUTRAL" then
+                    score = (sec.clearedSide == side) and 220 or 180
+                elseif sec.side == side and sec.underAttack then
+                    score = 80
+                end
+                if score > 0 then
+                    table.insert(candidates, { name = sName, sec = sec, score = score })
                 end
             elseif role == "STRIKE" or role == "SEAD" then
-                if sec.side == enemySide then
-                    score = (sec.income or 2) * 10
-                    if sName:find("Refinery") or sName:find("Fuel") then score = score + 40 end
-                    if sName:find("Aerospace") or sName:find("Silicon") then score = score + 35 end
-                    if sName:find("Munitions") or sName:find("Stronghold") then score = score + 30 end
-                    if sec.underAttack then score = score + 25 end
+                if sec.side == enemySide and sec.status ~= "NEUTRAL" then
+                    local frontDist = math.abs((sec.pos and sec.pos.x or 0) - (-165000)) / 1000
+                    score = math.max(10, 300 - frontDist) + (sec.income or 2) * 5
+                    if sec.underAttack then score = score + 60 end
                     table.insert(candidates, { name = sName, sec = sec, score = score })
                 end
             else -- CAP / ESCORT
@@ -694,6 +710,10 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
     local countryId = (side == SIDE_BLUE) and COUNTRY_BLUE or COUNTRY_RED
     local sideName = (side == SIDE_BLUE) and "BLUFOR" or "REDFOR"
 
+    local assignedRole = role or tmpl.role
+    local isHelo = (cat == Group.Category.HELICOPTER)
+    local isStrike = (assignedRole == "STRIKE" or assignedRole == "CAS")
+
     local targetPos = (targetSec and targetSec.pos) or { x = origin.x + 40000, z = origin.z + 40000 }
     if assignedRole == "CAP" then
         local pQuad = (targetQuadrant == "CENTER") and "CENTER" or ((targetQuadrant == "NE" or targetQuadrant == "SE") and "NE" or "NW")
@@ -702,10 +722,6 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
             targetPos = { x = pt.x, z = pt.z }
         end
     end
-
-    local assignedRole = role or tmpl.role
-    local isHelo = (cat == Group.Category.HELICOPTER)
-    local isStrike = (assignedRole == "STRIKE" or assignedRole == "CAS")
 
     -- Anti-Conga-Line Tactical Lateral Dispersion:
     -- Spreads out flights across parallel combat lanes instead of flying in a single file line.
@@ -726,7 +742,7 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
         alt = 150
         speed = Director.config.heloIngressSpeed or 65
     elseif isStrike then
-        alt = 450 -- Low-level terrain masking ingress
+        alt = 2800 -- Above AAA/MANPADS envelope so precision PGMs & Mavericks kill defenders
         speed = 210
     elseif assignedRole == "SEAD" then
         alt = 4500
@@ -746,72 +762,76 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
         grpTaskStr = "Ground Attack"
     end
 
-    -- Multi-Waypoint Tactical Route Building:
+    -- Multi-Waypoint Tactical Route Building (start from friendly runway when airbase ID is known):
     local routePoints = {}
-    local startX = origin.x + (isStrike and 0 or lateralSpread)
+    local startX = origin.x
     local startZ = origin.z
+    local function makeRunwayStart()
+        local wp = {
+            ["alt"] = origin.airdromeId and (origin.alt or 0) or alt,
+            ["type"] = origin.airdromeId and "TakeOffParkingHot" or "Turning Point",
+            ["action"] = origin.airdromeId and "From Parking Area Hot" or "Turning Point",
+            ["speed"] = origin.airdromeId and 0 or speed,
+            ["x"] = startX,
+            ["y"] = startZ,
+        }
+        if origin.airdromeId then wp["airdromeId"] = origin.airdromeId end
+        return wp
+    end
 
     if isStrike then
         -- 4-Waypoint Tactical Ingress Route:
-        -- WP1: Staging Base
+        -- WP1: Staging Airbase Runway
         -- WP2: Ingress Initial Point (IP) with tactical flank offset (hugs coastline or valley)
         -- WP3: Target Area (pop-up attack on SAMs / ground targets)
-        -- WP4: Safe Egress turn back to friendly lines
+        -- WP4: Return to staging base
         local midX = (origin.x + targetPos.x) / 2
         local midZ = (origin.z + targetPos.z) / 2
         local flankSign = (side == SIDE_BLUE) and -1 or 1
         local ipX = midX + (flankSign * 16000)
         local ipZ = midZ
 
-        table.insert(routePoints, {
-            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
-        })
+        table.insert(routePoints, makeRunwayStart())
         table.insert(routePoints, {
             ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
             ["speed"] = speed, ["x"] = ipX, ["y"] = ipZ
         })
 
-        local wpTargetTasks = {
-            {
-                ["id"] = "EngageTargetsInZone",
+        local wpTargetTasks = {}
+        local tgtGName = targetSec and targetSec.groupName
+        local tgtGrp = tgtGName and Group and Group.getByName and Group.getByName(tgtGName)
+        local atkType = (tmpl.type == "F-117-NightHawk") and "Level" or "Dive"
+        if tgtGrp and tgtGrp:isExist() and tgtGrp:getSize() > 0 then
+            table.insert(wpTargetTasks, {
+                ["id"] = "AttackGroup",
                 ["enabled"] = true,
                 ["auto"] = false,
                 ["params"] = {
-                    ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
-                    ["zoneRadius"] = 25000,
-                    ["targetTypes"] = { "Air Defence", "Ground Units" },
-                    ["priority"] = 0
+                    ["groupId"] = tgtGrp:getID(),
+                    ["expend"] = "All",
+                    ["attackType"] = atkType
                 }
-            }
-        }
-        local atkType = (tmpl.type == "F-117-NightHawk") and "Level" or "Dive"
+            })
+        end
         table.insert(wpTargetTasks, {
-            ["id"] = "Bombing",
+            ["id"] = "EngageTargetsInZone",
             ["enabled"] = true,
             ["auto"] = false,
             ["params"] = {
                 ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
-                ["expend"] = "All",
-                ["attackType"] = atkType,
-                ["altitude"] = 750,
-                ["altitudeEdited"] = true
+                ["zoneRadius"] = 25000,
+                ["targetTypes"] = { "Air Defence", "Ground Units" },
+                ["priority"] = 0
             }
         })
         table.insert(routePoints, {
-            ["alt"] = 750, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed + 20, ["x"] = targetPos.x, ["y"] = targetPos.z,
+            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+            ["speed"] = speed, ["x"] = targetPos.x, ["y"] = targetPos.z,
             ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = wpTargetTasks } }
         })
         table.insert(routePoints, {
             ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed, ["x"] = ipX, ["y"] = ipZ,
-            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = {
-                {
-                    ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
-                    ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
-                }
-            } } }
+            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
         })
 
     elseif assignedRole == "CAP" then
@@ -846,10 +866,7 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
                 }
             }
         }
-        table.insert(routePoints, {
-            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
-        })
+        table.insert(routePoints, makeRunwayStart())
         table.insert(routePoints, {
             ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
             ["speed"] = speed, ["x"] = capEntryX, ["y"] = capEntryZ
@@ -877,26 +894,31 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
                 ["id"] = "EngageTargetsInZone", ["enabled"] = true, ["auto"] = false,
                 ["params"] = { ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z }, ["zoneRadius"] = 45000, ["targetTypes"] = { "Air Defence" }, ["priority"] = 0 }
             })
-            table.insert(engTasks, {
-                ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
-                ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
-            })
-        else
-            table.insert(engTasks, {
-                ["id"] = "Orbit", ["enabled"] = true, ["auto"] = false,
-                ["params"] = { ["pattern"] = "Circle", ["speed"] = speed, ["altitude"] = alt }
-            })
         end
 
-        table.insert(routePoints, {
-            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed, ["x"] = startX, ["y"] = startZ
-        })
-        table.insert(routePoints, {
-            ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
-            ["speed"] = speed, ["x"] = targetPos.x, ["y"] = targetPos.z,
-            ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = engTasks } }
-        })
+        table.insert(routePoints, makeRunwayStart())
+        if assignedRole == "LOGISTICS" then
+            table.insert(routePoints, {
+                ["alt"] = 20, ["type"] = "Turning Point", ["action"] = "Turning Point",
+                ["speed"] = 18, ["x"] = targetPos.x, ["y"] = targetPos.z
+            })
+            table.insert(routePoints, {
+                ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+                ["speed"] = speed, ["x"] = startX, ["y"] = startZ
+            })
+        else
+            table.insert(routePoints, {
+                ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+                ["speed"] = speed, ["x"] = targetPos.x, ["y"] = targetPos.z,
+                ["task"] = { ["id"] = "ComboTask", ["params"] = { ["tasks"] = engTasks } }
+            })
+            if assignedRole == "SEAD" then
+                table.insert(routePoints, {
+                    ["alt"] = alt, ["type"] = "Turning Point", ["action"] = "Turning Point",
+                    ["speed"] = speed, ["x"] = startX, ["y"] = startZ
+                })
+            end
+        end
     end
 
     local groupData = {
@@ -921,8 +943,8 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
             ["name"] = uName,
             ["x"] = startX + offset,
             ["y"] = startZ + offset,
-            ["alt"] = alt,
-            ["speed"] = speed,
+            ["alt"] = origin.airdromeId and (origin.alt or 0) or alt,
+            ["speed"] = origin.airdromeId and 0 or speed,
             ["heading"] = origin.heading or 0,
             ["skill"] = tmpl.skill or "High",
             ["playerCanDrive"] = false,
@@ -948,75 +970,11 @@ function Director.SpawnFlight(side, role, targetSec, forceQuadrant, capSlot)
                 ctrl:setOption(AI.Option.Air.id.ROE, AI.Option.Air.val.ROE.WEAPON_FREE)
                 ctrl:setOption(AI.Option.Air.id.RADAR_USING, AI.Option.Air.val.RADAR_USING.FOR_CONTINUOUS_SEARCH)
 
-                if assignedRole == "CAP" then
+                if assignedRole == "CAP" or assignedRole == "ESCORT" or assignedRole == "SEAD" then
                     ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
-                    ctrl:pushTask({
-                        ["id"] = "EngageTargets",
-                        ["enabled"] = true,
-                        ["auto"] = false,
-                        ["params"] = {
-                            ["targetTypes"] = { "Planes" },
-                            ["maxDist"] = 48000, -- Constrained to defensive quadrant bubble (48 km / ~26 NM)
-                            ["priority"] = 0
-                        }
-                    })
-                elseif assignedRole == "ESCORT" then
-                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
-                    ctrl:pushTask({
-                        ["id"] = "EngageTargets",
-                        ["enabled"] = true,
-                        ["auto"] = false,
-                        ["params"] = {
-                            ["targetTypes"] = { "Planes" },
-                            ["maxDist"] = 55000,
-                            ["priority"] = 0
-                        }
-                    })
                 elseif isStrike then
-                    -- Strike planes: NO air combat hunting! Bypass threats, deploy ECM/chaff/flares, kill ground SAMs and armor!
-                    ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.BYPASS_AND_ESCAPE)
-                    ctrl:setOption(AI.Option.Air.id.ECM_USING, AI.Option.Air.val.ECM_USING.USE_IF_ONLY_LOCK_BY_RADAR)
-
-                    local tgtGName = targetSec and targetSec.groupName
-                    local tgtGrp = tgtGName and Group.getByName(tgtGName)
-                    local atkType = (tmpl.type == "F-117-NightHawk") and "Level" or "Dive"
-                    if tgtGrp and tgtGrp:isExist() and tgtGrp:getSize() > 0 then
-                        ctrl:pushTask({
-                            ["id"] = "AttackGroup",
-                            ["enabled"] = true,
-                            ["auto"] = false,
-                            ["params"] = {
-                                ["groupId"] = tgtGrp:getID(),
-                                ["expend"] = "All",
-                                ["attackType"] = atkType
-                            }
-                        })
-                    else
-                        ctrl:pushTask({
-                            ["id"] = "EngageTargetsInZone",
-                            ["enabled"] = true,
-                            ["auto"] = false,
-                            ["params"] = {
-                                ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
-                                ["zoneRadius"] = 25000,
-                                ["targetTypes"] = { "Air Defence", "Ground Units" },
-                                ["priority"] = 0
-                            }
-                        })
-                    end
-                elseif assignedRole == "SEAD" then
                     ctrl:setOption(AI.Option.Air.id.REACTION_ON_THREAT, AI.Option.Air.val.REACTION_ON_THREAT.EVADE_FIRE)
-                    ctrl:pushTask({
-                        ["id"] = "EngageTargetsInZone",
-                        ["enabled"] = true,
-                        ["auto"] = false,
-                        ["params"] = {
-                            ["point"] = { ["x"] = targetPos.x, ["y"] = targetPos.z },
-                            ["zoneRadius"] = 45000,
-                            ["targetTypes"] = { "Air Defence" },
-                            ["priority"] = 0
-                        }
-                    })
+                    ctrl:setOption(AI.Option.Air.id.ECM_USING, AI.Option.Air.val.ECM_USING.USE_IF_ONLY_LOCK_BY_RADAR)
                 end
             end
 
@@ -1048,23 +1006,34 @@ function Director.Loop()
     for side = 1, 2 do
         for grpName, gData in pairs(Director.activeGroups[side]) do
             local grp = Group.getByName(grpName)
-            if not grp or not grp:isExist() or grp:getSize() == 0 then
+            local groundedTooLong = false
+            if grp and grp:isExist() and (now - (gData.spawnTime or now)) > 480 then
+                local units = grp:getUnits() or {}
+                local hasInAirCheck, anyAir = false, false
+                for _, u in ipairs(units) do
+                    if u and u:isExist() and u.inAir then
+                        hasInAirCheck = true
+                        if u:inAir() then anyAir = true; break end
+                    end
+                end
+                if hasInAirCheck and not anyAir then groundedTooLong = true end
+            end
+            local expired = groundedTooLong or (grp and grp:isExist() and gData.role ~= "CAP" and (now - (gData.spawnTime or now)) > 1200)
+            if expired then pcall(function() grp:destroy() end) end
+            if expired or not grp or not grp:isExist() or grp:getSize() == 0 then
                 -- Do not lose track of a surviving aircraft because its sortie ran long.
                 if gData.role == "CAP" and gData.capSlot then
-                    -- 3-Minute Scramble Cooldown (180s)
-                    -- Simulates ramp preparation, taxi, takeoff roll, and scramble transit!
-                    Director.slotCooldowns[side][gData.capSlot] = now + 180
+                    Director.slotCooldowns[side][gData.capSlot] = now + 600
                     local enemySide = (side == SIDE_BLUE) and SIDE_RED or SIDE_BLUE
                     local enemyName = (enemySide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
                     local friendlyName = (side == SIDE_BLUE) and "BLUFOR" or "REDFOR"
                     local frontLabel = (gData.capSlot == 1 or gData.capSlot == 4) and "West Front" or ((gData.capSlot == 2 or gData.capSlot == 5) and "East Front" or "Central Ridge")
-                    log(string.format("AI DIRECTOR: [%s] CAP (%s) lost! 3-minute scramble cooldown active. [%s] holds Air Superiority Window in %s!",
+                    log(string.format("AI DIRECTOR: [%s] CAP (%s) lost! 10-minute scramble cooldown active. [%s] holds Air Superiority Window in %s!",
                         friendlyName, frontLabel, enemyName, frontLabel))
-                    trigger.action.outText(string.format("TAC-COMM: [%s] CAP over %s destroyed! [%s] Air Superiority Window OPEN (3:00)!",
+                    trigger.action.outText(string.format("TAC-COMM: [%s] CAP over %s destroyed! [%s] Air Superiority Window OPEN (10:00)!",
                         friendlyName, frontLabel, enemyName), 12)
                 else
-                    -- Strike / Support role cooldown (120s / 2 minutes turnaround)
-                    Director.roleCooldowns[side][gData.role] = now + 120
+                    Director.roleCooldowns[side][gData.role] = now
                 end
                 Director.activeGroups[side][grpName] = nil
             end
@@ -1128,8 +1097,8 @@ function Director.Loop()
 
     if tryPatrol(1, 2) then return now + 8 end
     if now < 60 then return now + 10 end
-    if trySupport("SEAD") or trySupport("STRIKE") or tryPatrol(3, 3)
-        or trySupport("ESCORT") or trySupport("LOGISTICS") then return now + 8 end
+    if trySupport("SEAD") or trySupport("STRIKE") or trySupport("LOGISTICS")
+        or tryPatrol(3, 3) or trySupport("ESCORT") then return now + 8 end
 
     return now + 15
 end

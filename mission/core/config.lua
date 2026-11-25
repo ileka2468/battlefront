@@ -46,6 +46,7 @@ BF.Config = {
 
     -- Economic Income Payout Interval (Seconds)
     economyInterval = 300, -- 5 Minutes
+    passiveIncomeMultiplier = 0.5,
 
     -- Facility Industrial Upgrade System
     upgradeCosts = {

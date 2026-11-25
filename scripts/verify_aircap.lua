@@ -34,28 +34,28 @@ BF.Log = function(message) logs[#logs+1]=message end
 D.SelectTargetSector = function() return nil end
 
 local redUnits={}
-for i=1,8 do redUnits[i]=unit(tostring(i),plane) end
-redUnits[9]=unit(99,plane,false) -- Late activation, not an active airframe.
-redUnits[10]=unit(98,plane,true,false) -- Dead object.
+for i=1,13 do redUnits[i]=unit(tostring(i),plane) end
+redUnits[14]=unit(99,plane,false) -- Late activation, not an active airframe.
+redUnits[15]=unit(98,plane,true,false) -- Dead object.
 group(red,plane,"untracked wing",redUnits)
-group(red,helo,"untracked helo",{unit(9,helo)})
+group(red,helo,"untracked helo",{unit(14,helo)})
 group(red,plane,"stale dead group",{unit(96,plane)},false)
-players[red]={unit(1,plane),unit(10,plane,false),unit(97,Unit.Category.GROUND_UNIT)}
+players[red]={unit(1,plane),unit(15,plane,false),unit(97,Unit.Category.GROUND_UNIT)}
 
 if not D.GetActiveAircraftCount then
     assert(D.SpawnFlight(red,'CAP',nil,'NW',1) == nil and #calls==1)
-    print('BASELINE: native flight launch adds a two-ship even when RED already has ten active airframes')
+    print('BASELINE: native flight launch adds a two-ship even when RED already has fifteen active airframes')
     os.exit(1)
 end
 if not D.GetActiveAircraftCount(red) then
     print('BASELINE: active aircraft with a native string ID makes the census unavailable and stalls launches')
     os.exit(1)
 end
-assert(D.GetActiveAircraftCount(red)==10 and D.GetActiveAircraftCount(blue)==0)
+assert(D.GetActiveAircraftCount(red)==15 and D.GetActiveAircraftCount(blue)==0)
 local counter=D.groupCounter
 local ok, why=D.SpawnFlight(red,'CAP',nil,'NW',1)
 assert(not ok and why=='aircraft_cap' and #calls==0 and counter==D.groupCounter)
-players[red]={redUnits[1]} -- nine still cannot add a flight of two.
+players[red]={redUnits[1]} -- fourteen still cannot add a flight of two.
 ok,why=D.SpawnFlight(red,'CAP',nil,'NW',1)
 assert(not ok and why=='aircraft_cap' and #calls==0)
 unavailable=red
@@ -63,17 +63,17 @@ ok,why=D.SpawnFlight(red,'CAP',nil,'NW',1)
 assert(not ok and why=='aircraft_count_unavailable' and #calls==0)
 assert(D.Loop()==now+8 and #calls==1 and calls[1].side==blue and D.GetActiveAircraftCount(blue)==2)
 assert(table.concat(logs,'\n'):find('aircraft census unavailable; launch deferred: ',1,true))
-print('CAP: numeric/string unit IDs normalized; 10 active including orphan fixed-wing, helicopter and occupied client; no double count; denied before native launch at nine/ten and on census failure')
+print('CAP: numeric/string unit IDs normalized; 15 active including orphan fixed-wing, helicopter and occupied client; no double count; denied before native launch at fourteen/fifteen and on census failure')
 
 unavailable=nil
-for i=1,4 do now=now+10; assert(D.Loop()==now+8) end
-assert(#calls==5 and D.GetActiveAircraftCount(blue)==10)
+for i=1,6 do now=now+10; assert(D.Loop()==now+8) end
+assert(#calls==7 and D.GetActiveAircraftCount(blue)==14)
 local roles={}
 for _, f in pairs(D.activeGroups[blue]) do roles[f.role]=(roles[f.role] or 0)+1 end
-assert(roles.CAP==3 and roles.SEAD==1 and roles.STRIKE==1)
+assert(roles.CAP==3 and roles.SEAD==1 and roles.STRIKE==1 and roles.LOGISTICS==1 and roles.ESCORT==1)
 now=now+1000
-assert(D.Loop()==now+15 and #calls==5 and D.GetActiveAircraftCount(blue)==10)
-print('SCHEDULER: blocked RED did not starve BLUE; BLUE reached exactly 10 with three CAP pairs, one SEAD pair and one STRIKE pair; full sides waited')
+assert(D.Loop()==now+15 and #calls==7 and D.GetActiveAircraftCount(blue)==14)
+print('SCHEDULER: blocked RED did not starve BLUE; BLUE reached 14 with three CAP pairs, SEAD, STRIKE, LOGISTICS and ESCORT; full sides waited')
 
 -- A native addGroup may refuse a particular support flight. A later role must still get a turn.
 for name, f in pairs(D.activeGroups[blue]) do
@@ -84,14 +84,11 @@ for name, f in pairs(D.activeGroups[blue]) do
 end
 now=now+10
 D.roleCooldowns[blue].ESCORT, D.roleCooldowns[blue].LOGISTICS = now+500, now+500
-D.Loop() -- cleanup puts both support roles on cooldown; no flight is added.
-assert(#calls==5)
 local add=coalition.addGroup
 coalition.addGroup=function(countryId,cat,data)
     if data.task=='SEAD' then return nil end
     return add(countryId,cat,data)
 end
-now=now+121
-assert(D.Loop()==now+8 and #calls==6 and D.GetActiveAircraftCount(blue)==8)
-assert(not roles.LOGISTICS)
+assert(D.Loop()==now+8 and #calls==8 and D.GetActiveAircraftCount(blue)==12)
+assert(roles.LOGISTICS==1)
 print('SCHEDULER: failed native SEAD launch did not prevent trying the next support role')

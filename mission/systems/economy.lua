@@ -78,7 +78,8 @@ function BF.EconomyTick()
     for secName, sec in pairs(BF.State.sectors) do
         local coal = BF.State.coalitions[sec.side]
         if coal and (sec.status == "DEFENDED" or sec.status == "FORTIFIED" or sec.status == "HOLDING") then
-            coal.treasury = coal.treasury + sec.income
+            local mult = BF.Config.passiveIncomeMultiplier or 1.0
+            coal.treasury = coal.treasury + math.max(1, math.floor(sec.income * mult))
         end
     end
 

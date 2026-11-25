@@ -31,17 +31,17 @@ function BF.SpawnSectorPointDefense(secName, side)
     local units = {}
     if side == SIDE_BLUE then
         units = {
-            { type = "M1097 Avenger", name = gname .. "_SHORAD", dx = 120, dz = 60 },
-            { type = "Vulcan",        name = gname .. "_AAA",    dx = -90, dz = -80 },
-            { type = "Soldier stinger", name = gname .. "_MANPAD", dx = 40, dz = -50 },
-            { type = "M2A2 Bradley",  name = gname .. "_ARMOR",  dx = -40, dz = 70 },
+            { type = "M1097 Avenger", name = gname .. "_SHORAD", dx = 620, dz = 460 },
+            { type = "Vulcan",        name = gname .. "_AAA",    dx = -620, dz = -460 },
+            { type = "Soldier stinger", name = gname .. "_MANPAD", dx = 560, dz = -520 },
+            { type = "M2A2 Bradley",  name = gname .. "_ARMOR",  dx = -560, dz = 520 },
         }
     else
         units = {
-            { type = "2S6 Tunguska",  name = gname .. "_SHORAD", dx = 120, dz = 60 },
-            { type = "ZSU-23-4 Shilka", name = gname .. "_AAA",  dx = -90, dz = -80 },
-            { type = "SA-18 Igla-S manpad", name = gname .. "_MANPAD", dx = 40, dz = -50 },
-            { type = "BMP-3",         name = gname .. "_ARMOR",  dx = -40, dz = 70 },
+            { type = "2S6 Tunguska",  name = gname .. "_SHORAD", dx = 620, dz = 460 },
+            { type = "ZSU-23-4 Shilka", name = gname .. "_AAA",  dx = -620, dz = -460 },
+            { type = "SA-18 Igla-S manpad", name = gname .. "_MANPAD", dx = 560, dz = -520 },
+            { type = "BMP-3",         name = gname .. "_ARMOR",  dx = -560, dz = 520 },
         }
     end
 

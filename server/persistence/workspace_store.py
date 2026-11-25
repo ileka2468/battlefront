@@ -31,11 +31,16 @@ SIGNUP_LIMIT = 1000
 DELIVERY_ITEM = "AIM-120D"
 DELIVERY_SIDE = 2
 DELIVERY_VERSION = 3
+DELIVERY_BATCH_VERSION = 4
+DELIVERY_BATCH_MAX = 6
+DELIVERY_STOCK_MAX = 12
 DELIVERY_AIRFIELD = "Mineralnye Vody"
 DELIVERY_REQUEST = "battlefront_delivery.request"
 DELIVERY_RECEIPT = "battlefront_delivery.receipt"
 DELIVERY_GUARD = "battlefront_delivery.applying"
 DELIVERY_CAPABILITY = "battlefront_delivery.capability"
+DELIVERY_HISTORY = "battlefront_delivery.history"
+DELIVERY_JOURNAL = (DELIVERY_REQUEST, DELIVERY_GUARD, DELIVERY_RECEIPT)
 DELIVERY_CAPABILITY_CONTENT = b"BF3 VIPER_D_READY\n"
 DELIVERY_AIRFIELD_CAPABILITIES = {
     DELIVERY_AIRFIELD: DELIVERY_CAPABILITY_CONTENT,
@@ -43,10 +48,12 @@ DELIVERY_AIRFIELD_CAPABILITIES = {
 }
 DELIVERY_CAPABILITY_MAX_AGE = 10
 DELIVERY_PROFILE = "viper-d-recording"
+DELIVERY_ORDER_ID = re.compile(r"[0-9a-f]{32}")
 RECEIPT = re.compile(
     rb"BF3 ([0-9a-f]{32}) (APPLYING|READY|REJECTED|REVIEW) "
     rb"(-1|0|[1-9][0-9]{0,8}) (-1|0|[1-9][0-9]{0,8}) ([a-z][a-z0-9_]{0,39})\n",
 )
+BATCH_RECEIPT = re.compile(RECEIPT.pattern.replace(b"BF3 ", b"BF4 ", 1))
 
 
 class WorkspaceError(Exception):
@@ -125,7 +132,7 @@ def read_accounts(path):
 class WorkspaceStore:
     def __init__(self, db_path, accounts_path, catalog, *, delivery_dir=None, delivery_account=None,
                  delivery_airfield=DELIVERY_AIRFIELD, link_dir=None, linked_delivery_pilot_file=None,
-                 linked_delivery_merits=0):
+                 linked_delivery_merits=0, delivery_batch=False):
         self.path = Path(db_path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.accounts = read_accounts(accounts_path)
@@ -135,6 +142,8 @@ class WorkspaceStore:
         self.delivery_dir, self.configured_delivery_actor = None, None
         self.linked_delivery_pilot_file = None
         self.linked_delivery_merits = integer(linked_delivery_merits, "linked demo merits", 0, 100)
+        self.delivery_batch = delivery_batch is True
+        self.delivery_protocol = DELIVERY_BATCH_VERSION if self.delivery_batch else DELIVERY_VERSION
         self.delivery_airfield = (delivery_airfield if isinstance(delivery_airfield, str)
                                   and delivery_airfield in DELIVERY_AIRFIELD_CAPABILITIES else None)
         configured = self.accounts.get(delivery_account or "")
@@ -176,6 +185,9 @@ class WorkspaceStore:
                         OR (side IS NOT NULL AND side IN (1,2) AND dcs_owner IS NOT NULL)));
                 CREATE TABLE IF NOT EXISTS workspace_pairing (
                     actor TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, issued INTEGER NOT NULL, expires INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS workspace_delivery_history (
+                    order_id TEXT PRIMARY KEY, order_state TEXT NOT NULL, request BLOB NOT NULL,
+                    guard BLOB, receipt BLOB NOT NULL, retired_at TEXT NOT NULL);
             """)
             db.execute("INSERT OR IGNORE INTO workspace_state VALUES (1,?)",
                 (json.dumps(dict(players={}, listings={}, trades=[], operations={}, previous_plans=[], commanders={})),))
@@ -187,6 +199,8 @@ class WorkspaceStore:
         db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=8, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
+            if self.delivery_batch:
+                db.execute("PRAGMA synchronous=FULL")
             if write:
                 db.execute("BEGIN IMMEDIATE")
             yield db
@@ -453,12 +467,20 @@ class WorkspaceStore:
         with self.connect() as db:
             return actor == self._delivery_actor(db)
 
-    def _current_delivery(self, order):
+    def _scoped_delivery(self, order):
         # Earlier demo escrow entries are never reclassified as AIM-120D orders.
         # BF3 orders created before per-airfield recording were Mineralnye Vody only.
-        return bool(order and self.delivery_airfield and order.get("item") == DELIVERY_ITEM
-                    and order.get("protocol") == DELIVERY_VERSION
-                    and order.get("airfield", DELIVERY_AIRFIELD) == self.delivery_airfield)
+        if not (isinstance(order, dict) and self.delivery_airfield and order.get("item") == DELIVERY_ITEM
+                and order.get("airfield", DELIVERY_AIRFIELD) == self.delivery_airfield
+                and isinstance(order.get("order_id"), str) and DELIVERY_ORDER_ID.fullmatch(order["order_id"])):
+            return False
+        protocol, qty = order.get("protocol"), order.get("quantity", 1)
+        return type(protocol) is int and type(qty) is int and ((protocol == DELIVERY_VERSION and qty == 1)
+               or (self.delivery_batch and self.delivery_airfield == "Vaziani"
+                   and protocol == DELIVERY_BATCH_VERSION and "quantity" in order and 1 <= qty <= DELIVERY_BATCH_MAX))
+
+    def _current_delivery(self, order):
+        return self._scoped_delivery(order) and order["protocol"] == self.delivery_protocol
 
     def _delivery_path(self, name):
         directory = self.delivery_dir
@@ -467,7 +489,10 @@ class WorkspaceStore:
         return directory / name
 
     def _read_delivery_file(self, name, *, max_age=None):
-        path = self._delivery_path(name)
+        return self._read_delivery_path(self._delivery_path(name), max_age=max_age)
+
+    @staticmethod
+    def _read_delivery_path(path, *, max_age=None):
         if path.is_symlink():
             raise OSError("Unsafe simulator delivery file")
         try:
@@ -487,7 +512,10 @@ class WorkspaceStore:
         return value
 
     def _delivery_profile_ready(self):
-        expected = DELIVERY_AIRFIELD_CAPABILITIES.get(self.delivery_airfield)
+        if self.delivery_batch:
+            expected = b"BF4 VIPER_D_READY VAZIANI\n" if self.delivery_airfield == "Vaziani" else None
+        else:
+            expected = DELIVERY_AIRFIELD_CAPABILITIES.get(self.delivery_airfield)
         if expected is None:
             return False
         try:
@@ -496,16 +524,213 @@ class WorkspaceStore:
             return False
 
     def _delivery_lane_empty(self):
-        return all(self._read_delivery_file(name) is None
-                   for name in (DELIVERY_REQUEST, DELIVERY_RECEIPT, DELIVERY_GUARD))
+        return all(self._read_delivery_file(name) is None for name in DELIVERY_JOURNAL)
 
     @staticmethod
     def _delivery_request(order):
-        return f"BF{DELIVERY_VERSION} {order['order_id']} {DELIVERY_ITEM}\n".encode("ascii")
+        protocol = order["protocol"]
+        quantity = f" {order['quantity']}" if protocol == DELIVERY_BATCH_VERSION else ""
+        return f"BF{protocol} {order['order_id']} {DELIVERY_ITEM}{quantity}\n".encode("ascii")
 
     @staticmethod
     def _delivery_guard(order):
-        return f"BF{DELIVERY_VERSION} {order['order_id']} APPLYING\n".encode("ascii")
+        return f"BF{order['protocol']} {order['order_id']} APPLYING\n".encode("ascii")
+
+    @staticmethod
+    def _receipt_fields(order, raw):
+        regex = BATCH_RECEIPT if order["protocol"] == DELIVERY_BATCH_VERSION else RECEIPT
+        receipt = regex.fullmatch(raw or b"")
+        if receipt and receipt[1].decode("ascii") == order["order_id"]:
+            _, status, lo, hi, code = (part.decode("ascii") for part in receipt.groups())
+            return status, int(lo), int(hi), code
+
+    @staticmethod
+    def _native_outcome(order, fields, guard, expected_guard):
+        status, before, after, code = fields
+        quantity = order.get("quantity", 1)
+        batch = order["protocol"] == DELIVERY_BATCH_VERSION
+        valid_before = (0 <= before <= DELIVERY_STOCK_MAX - quantity) if batch else before == 0
+        if guard == expected_guard and valid_before:
+            if status == "APPLYING" and after == -1 and code == "prewrite":
+                return "applying"
+            if (status == "READY" and after == before + quantity and code == "verified"
+                    and order.get("applying_before", before) == before):
+                return "ready"
+        if status == "REJECTED" and guard is None and not order.get("applying_seen"):
+            if code in ("invalid_setup", "stock_unavailable") and before == after == -1:
+                return "rejected"
+            if before == after and ((not batch and code == "stock_not_zero" and before > 0)
+                    or (batch and code == "stock_limit" and before >= 0 and before + quantity > DELIVERY_STOCK_MAX)):
+                return "rejected"
+        return "review"
+
+    @staticmethod
+    def _sync_delivery_dir(path):
+        if hasattr(os, "O_DIRECTORY"):
+            dir_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+    def _history_directory(self, *, create=False):
+        directory = self._delivery_path(DELIVERY_HISTORY)
+        if create:
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            else:
+                self._sync_delivery_dir(directory.parent)
+        try:
+            details = directory.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISDIR(details.st_mode) or directory.resolve(strict=True) != directory
+                or (os.name == "posix" and (details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o700))):
+            raise OSError("Unsafe simulator delivery history")
+        return directory
+
+    def _retired_seal(self, order_id):
+        if not DELIVERY_ORDER_ID.fullmatch(order_id):
+            raise OSError("Unexpected simulator delivery ID")
+        directory = self._history_directory()
+        return None if directory is None else self._read_delivery_path(directory / (order_id + ".retired"))
+
+    @staticmethod
+    def _retired_value(order_id):
+        return f"BF4 {order_id} RETIRED\n".encode("ascii")
+
+    def _seal_retired(self, order_id):
+        directory = self._history_directory(create=True)
+        if directory is None:
+            raise OSError("Simulator delivery history unavailable")
+        sentinel = directory / (order_id + ".retired")
+        expected = self._retired_value(order_id)
+        if self._read_delivery_path(sentinel) is None:
+            fd, temporary = tempfile.mkstemp(prefix=".retiring-", dir=directory)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(expected)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(temporary, sentinel)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        if self._read_delivery_path(sentinel) != expected:
+            raise OSError("Simulator delivery history seal mismatch")
+        self._sync_delivery_dir(directory)
+
+    def _journal_match(self, order, journal):
+        request, guard, receipt = journal
+        fields = self._receipt_fields(order, receipt)
+        return (request == self._delivery_request(order) and fields is not None
+                and fields[1:] == (order.get("before"), order.get("after"), order.get("reason"))
+                and self._native_outcome(order, fields, guard, self._delivery_guard(order)) == order["status"])
+
+    def _retirement_plan(self, db, order):
+        # Locally refused pre-publication attempts refund inventory; unlike a
+        # native terminal journal they confer no authority to rotate this lane.
+        if (not self.delivery_batch or not self._scoped_delivery(order) or order.get("armed_at") is None
+                or order["status"] not in ("ready", "rejected")):
+            return None
+        key = order["order_id"]
+        encoded = json.dumps(order, sort_keys=True, separators=(",", ":"))
+        row = db.execute("SELECT order_state, request, guard, receipt FROM workspace_delivery_history WHERE order_id=?",
+                         (key,)).fetchone()
+        current = tuple(self._read_delivery_file(name) for name in DELIVERY_JOURNAL)
+        seal = self._retired_seal(key)
+        if row is None:
+            return (encoded, current, False) if seal is None and self._journal_match(order, current) else None
+        recorded = tuple(row)[1:]
+        if row[0] != encoded or not self._journal_match(order, recorded):
+            return None
+        if seal is None and current == recorded:
+            return encoded, recorded, True
+        if seal == self._retired_value(key) and all(file is None or file == saved for file, saved in zip(current, recorded)):
+            return encoded, recorded, True
+        return None
+
+    def _retake_owner(self, db, actor, native_owner_key):
+        if (self.configured_delivery_actor is not None or not native_owner_key
+                or self._linked_delivery_owner() != native_owner_key or self._delivery_actor(db) != actor):
+            raise WorkspaceError("The selected account is not the current approved linked BLUE pilot.", 409)
+
+    def _retire_prior_delivery(self, session, quantity, *, retake=None):
+        """Commit exact journal bytes before touching the live simulator directory."""
+        with self.connect(write=True) as db:
+            state = self._read(db)
+            if retake is None:
+                self._dispatch_player(db, state, session, quantity)
+                actor = session["actor"]
+            else:
+                actor, owner = retake
+                self._retake_owner(db, actor, owner)
+            order = state.get("delivery")
+            if not self._delivery_profile_ready():
+                raise WorkspaceError("The AIM-120D recording profile is not ready in DCS.", 409)
+            self._history_directory(create=True)
+            if not order:
+                if retake is not None:
+                    raise WorkspaceError("The selected pilot has no verified terminal order to archive.", 409)
+                return None
+            plan = self._retirement_plan(db, order) if order.get("actor") == actor else None
+            if plan is None:
+                raise WorkspaceError("The previous delivery needs confirmation before starting another.", 409)
+            encoded, journal, known = plan
+            key = order["order_id"]
+            if not known:
+                db.execute("INSERT INTO workspace_delivery_history VALUES (?,?,?,?,?,?)",
+                           (key, encoded, *journal, iso_now()))
+        with self.connect(write=True) as db:
+            if retake is not None:
+                self._retake_owner(db, actor, owner)
+            order = self._read(db).get("delivery")
+            if not order or order.get("order_id") != key:
+                raise WorkspaceError("Another delivery already started.", 409)
+            plan = self._retirement_plan(db, order)
+            if plan is None or not plan[2]:
+                raise WorkspaceError("The previous delivery journal changed.", 409)
+            self._seal_retired(key)
+            # Withdraw the native request first. The permanent per-ID seal is
+            # durable before this point, so a cached old request cannot replay.
+            # Already-missing entries are permitted only with the exact seal
+            # and SQLite archive; this resumes a partially completed cleanup.
+            for name, saved in zip(DELIVERY_JOURNAL, plan[1]):
+                present = self._read_delivery_file(name)
+                if present is not None:
+                    if present != saved:
+                        raise WorkspaceError("The previous delivery journal changed.", 409)
+                    path = self._delivery_path(name)
+                    path.unlink()
+                    self._sync_delivery_dir(path.parent)
+        return key
+
+    def retire_linked_delivery_for_retake(self, old_actor):
+        """Trusted local maintenance only; never expose through mutate/HTTP."""
+        if (not self.delivery_batch or self.delivery_airfield != "Vaziani" or self.linked_delivery_merits != 50
+                or not isinstance(old_actor, str) or not ACCOUNT_ID.fullmatch(old_actor)):
+            raise WorkspaceError("The exact approved recording account and its 50 CM policy are required.", 409)
+        owner = self._linked_delivery_owner()
+        try:
+            key = self._retire_prior_delivery(None, None, retake=(old_actor, owner))
+            with self.connect(write=True) as db:
+                self._retake_owner(db, old_actor, owner)
+                state = self._read(db)
+                order = state.get("delivery") or {}
+                if (order.get("order_id") != key or order.get("actor") != old_actor
+                        or not self._retirement_plan(db, order) or not self._delivery_lane_empty()
+                        or self._retired_seal(key) != self._retired_value(key)):
+                    raise WorkspaceError("The archived recording lane is not ready for reassignment.", 409)
+                result = db.execute("UPDATE workspace_signups SET dcs_owner=? WHERE id=? AND side=2 AND dcs_owner=?",
+                                    ("retired:" + old_actor, old_actor, owner))
+                if result.rowcount != 1:
+                    raise WorkspaceError("The approved native link has changed.", 409)
+                del state["delivery"]
+                self._save(db, state)
+                self._record(db, old_actor, "dcs_link_retired", {"native_owner_hash": owner, "order_id": key})
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceError("The authenticated delivery history is unavailable.", 503) from exc
 
     def _publish_delivery_request(self, order):
         target = self._delivery_path(DELIVERY_REQUEST)
@@ -520,33 +745,33 @@ class WorkspaceStore:
             # Publishing a complete inode without replacing an existing request
             # means a prior operation cannot be lost or silently overwritten.
             os.link(temporary, target)
-            if hasattr(os, "O_DIRECTORY"):
-                dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
+            self._sync_delivery_dir(target.parent)
             return True
         finally:
             Path(temporary).unlink(missing_ok=True)
 
-    def _delivery_view(self, order):
-        return {"status": order["status"] if order else "idle", "item": DELIVERY_ITEM,
-                "order_id": order["order_id"] if order else None, "airfield": self.delivery_airfield}
+    def _delivery_view(self, order, *, can_send=False):
+        result = {"status": order["status"] if order else "idle", "item": DELIVERY_ITEM,
+                  "order_id": order["order_id"] if order else None, "airfield": self.delivery_airfield}
+        if self.delivery_batch:
+            result.update(quantity=order.get("quantity", 1) if order else 0,
+                          max_quantity=DELIVERY_BATCH_MAX, can_send=can_send)
+        return result
 
     def _finish_delivery(self, db, state, order, status, reason, before=None, after=None):
+        quantity = order.get("quantity", 1)
         if status == "rejected":
             player = state["players"].get(order["actor"])
             if not player or player.get("side") != DELIVERY_SIDE:
                 status, reason = "review", "escrow_owner_unavailable"
             else:
                 inventory = player["inventory"]
-                inventory[DELIVERY_ITEM] = inventory.get(DELIVERY_ITEM, 0) + 1
+                inventory[DELIVERY_ITEM] = inventory.get(DELIVERY_ITEM, 0) + quantity
         order.update(status=status, reason=reason, before=before, after=after)
         self._save(db, state)
         self._record(db, order["actor"], "delivery_" + status, {
             "order_id": order["order_id"], "item": DELIVERY_ITEM, "reason": reason,
-            "before": before, "after": after, "refunded_units": int(status == "rejected")})
+            "before": before, "after": after, "refunded_units": quantity if status == "rejected" else 0})
 
     def reconcile_delivery(self):
         """Settle a private receipt or publish one never-attempted staged request."""
@@ -580,25 +805,25 @@ class WorkspaceStore:
                 claim = order["order_id"]
                 self._save(db, state)
             elif request == expected:
-                receipt = RECEIPT.fullmatch(raw or b"")
-                if receipt is None or receipt[1].decode("ascii") != order["order_id"]:
+                fields = self._receipt_fields(order, raw)
+                if fields is None:
                     return
-                _, status, lo, hi, code = (part.decode("ascii") for part in receipt.groups())
-                before, after = int(lo), int(hi)
-                armed = guard == self._delivery_guard(order)
-                if status == "APPLYING" and (before, after, code) == (0, -1, "prewrite"):
-                    if not armed:
-                        return     # Guard must precede APPLYING; incomplete visibility cannot confirm a write.
+                status, before, after, code = fields
+                expected_guard = self._delivery_guard(order)
+                outcome = self._native_outcome(order, fields, guard, expected_guard)
+                if status == "APPLYING" and self._native_outcome(order, fields, expected_guard, expected_guard) == "applying":
+                    if outcome != "applying":
+                        return     # Incomplete guard visibility cannot confirm any write.
                     if not order.get("applying_seen"):
                         order["applying_seen"] = True
+                        if order["protocol"] == DELIVERY_BATCH_VERSION:
+                            order["applying_before"] = before
                         self._save(db, state)
+                    elif order.get("applying_before", before) != before:
+                        self._finish_delivery(db, state, order, "review", "unverified_receipt", before, after)
                     return
-                if status == "READY" and armed and (before, after, code) == (0, 1, "verified"):
-                    self._finish_delivery(db, state, order, "ready", code, before, after)
-                elif (status == "REJECTED" and guard is None and not order.get("applying_seen")
-                      and ((code in ("invalid_setup", "stock_unavailable") and before == after == -1)
-                           or (code == "stock_not_zero" and before == after and before > 0))):
-                    self._finish_delivery(db, state, order, "rejected", code, before, after)
+                if outcome in ("ready", "rejected"):
+                    self._finish_delivery(db, state, order, outcome, code, before, after)
                 else:
                     self._finish_delivery(db, state, order, "review",
                                           code if status == "REVIEW" else "unverified_receipt", before, after)
@@ -622,45 +847,77 @@ class WorkspaceStore:
                     # Keep the item in escrow and never retry the write.
                     self._finish_delivery(db, state, order, "review", "publication_uncertain")
 
+    def _dispatch_player(self, db, state, session, quantity, *, inventory=True):
+        actor, side = session["actor"], session["side"]
+        if not db.execute("SELECT 1 FROM workspace_sessions WHERE hash=? AND expires>?",
+                          (session["hash"], int(time.time()))).fetchone():
+            raise WorkspaceError("Sign in to request simulator delivery.", 401)
+        player = state["players"].get(actor)
+        if not player or player["side"] != side or actor != self._delivery_actor(db):
+            raise WorkspaceError("Pilot account unavailable.", 403)
+        if inventory and player["inventory"].get(DELIVERY_ITEM, 0) < quantity:
+            units = "one" if quantity == 1 else str(quantity)
+            raise WorkspaceError(f"Requisition {units} {DELIVERY_ITEM} in the companion armory first.", 409)
+        return player
+
     def _send_to_dcs(self, session, body):
         actor, side = session["actor"], session["side"]
         if not self._delivery_eligible(actor, side):
             raise WorkspaceError("Simulator delivery is not enabled for this account.", 403)
-        if body != {"munition": DELIVERY_ITEM}:
-            raise WorkspaceError(f"Only one {DELIVERY_ITEM} from your companion armory can be sent.", 400)
+        if self.delivery_batch:
+            if (set(body) not in ({"munition"}, {"munition", "quantity"}) or body.get("munition") != DELIVERY_ITEM):
+                raise WorkspaceError(f"Only the {DELIVERY_ITEM} can be sent in this profile.", 400)
+            quantity = integer(body.get("quantity", 1), "simulator quantity", 1, DELIVERY_BATCH_MAX)
+        else:
+            if body != {"munition": DELIVERY_ITEM}:
+                raise WorkspaceError(f"Only one {DELIVERY_ITEM} from your companion armory can be sent.", 400)
+            quantity = 1
         self.reconcile_delivery()
+        retired = None
+        if self.delivery_batch:
+            try:
+                retired = self._retire_prior_delivery(session, quantity)
+            except (OSError, RuntimeError) as exc:
+                raise WorkspaceError("The simulator delivery history is unavailable.", 503) from exc
         with self.connect(write=True) as db:
-            if not db.execute("SELECT 1 FROM workspace_sessions WHERE hash=? AND expires>?",
-                              (session["hash"], int(time.time()))).fetchone():
-                raise WorkspaceError("Sign in to request simulator delivery.", 401)
             state = self._read(db)
-            player = state["players"].get(actor)
-            if not player or player["side"] != side:
-                raise WorkspaceError("Pilot account unavailable.", 403)
-            if state.get("delivery"):
+            player = self._dispatch_player(db, state, session, quantity, inventory=False)
+            prior = state.get("delivery")
+            if prior and (not self.delivery_batch or prior.get("order_id") != retired):
                 raise WorkspaceError("This recording lane already has an order.", 409)
             if not self._delivery_profile_ready():
                 raise WorkspaceError("The AIM-120D recording profile is not ready in DCS.", 409)
             inventory = player["inventory"]
-            if inventory.get(DELIVERY_ITEM, 0) < 1:
-                raise WorkspaceError(f"Requisition one {DELIVERY_ITEM} in the companion armory first.", 409)
+            if inventory.get(DELIVERY_ITEM, 0) < quantity:
+                raise WorkspaceError(f"Requisition {quantity if quantity != 1 else 'one'} {DELIVERY_ITEM} in the companion armory first.", 409)
             try:
                 occupied = not self._delivery_lane_empty()
+                if prior and self._retired_seal(retired) != self._retired_value(retired):
+                    occupied = True
+                for _ in range(8):
+                    key = secrets.token_hex(16)
+                    if (not self.delivery_batch or (self._retired_seal(key) is None and not db.execute(
+                            "SELECT 1 FROM workspace_delivery_history WHERE order_id=?", (key,)).fetchone())):
+                        break
+                else:
+                    raise OSError("No unused simulator delivery ID")
             except (OSError, RuntimeError):
                 raise WorkspaceError("The simulator recording lane is unavailable.", 503)
             if occupied:
                 raise WorkspaceError("The simulator recording lane is not empty.", 409)
-            inventory[DELIVERY_ITEM] -= 1
+            inventory[DELIVERY_ITEM] -= quantity
             if not inventory[DELIVERY_ITEM]:
                 del inventory[DELIVERY_ITEM]
                 player["planned_loadout"].pop(DELIVERY_ITEM, None)
-            order = {"order_id": secrets.token_hex(16), "actor": actor, "item": DELIVERY_ITEM,
-                     "protocol": DELIVERY_VERSION, "airfield": self.delivery_airfield,
+            order = {"order_id": key, "actor": actor, "item": DELIVERY_ITEM,
+                     "protocol": self.delivery_protocol, "airfield": self.delivery_airfield,
                      "status": "pending", "armed_at": None, "created_at": iso_now()}
+            if self.delivery_batch:
+                order["quantity"] = quantity
             state["delivery"] = order
             self._save(db, state)
             self._record(db, actor, "delivery_escrow", {"order_id": order["order_id"],
-                "item": DELIVERY_ITEM, "quantity": 1, "merits_charged": 0})
+                "item": DELIVERY_ITEM, "quantity": quantity, "merits_charged": 0})
         self.reconcile_delivery()
         delivery = self.get_state(session)["delivery"]
         message = {"rejected": "Delivery did not start; the item is back in your armory.",
@@ -674,8 +931,23 @@ class WorkspaceStore:
         eligible = self._delivery_eligible(actor, side)
         if eligible:
             self.reconcile_delivery()
+        delivery = None
         with self.connect() as db:
             state = self._read(db)
+            if eligible:
+                order = state.get("delivery")
+                own_order = self._scoped_delivery(order) and order["actor"] == actor
+                ready = self._delivery_profile_ready() if not order or (self.delivery_batch and own_order) else False
+                if (not order and ready) or own_order:
+                    can_send = False
+                    if self.delivery_batch and ready:
+                        try:
+                            self._history_directory()  # A malformed archive location is never dispatchable.
+                            can_send = (self._retirement_plan(db, order) is not None if own_order
+                                        else self._delivery_lane_empty())
+                        except (OSError, RuntimeError):
+                            pass
+                    delivery = self._delivery_view(order, can_send=can_send)
         players = {key: (row if key == actor else {k: row[k] for k in ("callsign", "side", "stats")})
                    for key, row in state["players"].items()}
         listings = [row for row in state["listings"].values() if row["side"] == side]
@@ -690,12 +962,8 @@ class WorkspaceStore:
                               "can_command": session["can_command"] if session else False},
                 "currency_name": "Companion Merits", "currency_symbol": "CM", "munition_catalog": self.catalog,
                 "players": players, "marketplace": listings, "trade_history": trades}
-        if eligible:
-            order = state.get("delivery")
-            # Old versions and other pilots' receipts stay private and untouched.
-            if ((not order and self._delivery_profile_ready())
-                    or (self._current_delivery(order) and order["actor"] == actor)):
-                result["delivery"] = self._delivery_view(order)
+        if delivery is not None:
+            result["delivery"] = delivery
         return result
 
     def get_campaign(self, session, sectors, projection):

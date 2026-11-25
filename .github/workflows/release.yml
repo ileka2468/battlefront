@@ -42,6 +42,23 @@ jobs:
           luac5.1 -p server/BattlefrontTelemetry.lua
           luac5.1 -p server/BattlefrontDelivery.lua
           lua5.1 scripts/verify_battlefront_delivery.lua
+          python - <<'EOF'
+          from pathlib import Path
+          s = Path('server/BattlefrontDelivery.lua').read_text(encoding='utf-8')
+          for old, new in [
+              ('BATTLEFRONT_DELIVERY_BARRIER_V3', 'BATTLEFRONT_CAMPAIGN_VIPER_BF3'),
+              ("local name = 'BLUE_F16C_1'", "local name = 'BLUE_VIPER_DEMO_1'"),
+              ("'Mineralnye Vody', 26, 2", "'Vaziani', 31, 2"),
+              ('local groupID, unitID = 1401, 1402', 'local groupID, unitID = 1403, 1404'),
+              ('local campaignProfile = false', 'local campaignProfile = true'),
+              ('local batchProfile = false', 'local batchProfile = true'),
+              ("BF3 VIPER_D_READY\\n", "BF4 VIPER_D_READY VAZIANI\\n"),
+          ]:
+              assert s.count(old) == 1, old
+              s = s.replace(old, new, 1)
+          Path('/tmp/bf4.lua').write_text(s, encoding='utf-8')
+          EOF
+          lua5.1 scripts/verify_battlefront_delivery.lua /tmp/bf4.lua batch
           luac5.1 -p server/BattlefrontCampaignLoader.lua
           luac5.1 -p server/BattlefrontViperSlotGuard.lua
           lua5.1 scripts/verify_viper_slot_guard.lua

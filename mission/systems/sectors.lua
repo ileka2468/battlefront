@@ -184,10 +184,22 @@ function BF.ProcessSectorsAndLogistics()
             local CAPTURE_LZ_RADIUS = 3000 -- 3 km delivery / touchdown radius
             local TRIPWIRE_RADIUS = BF.Config.holdRadius or 18000
 
-            -- Check all players for physical touchdown or tripwire breach
+            -- Check human players and AI logistics helicopters for physical touchdown or tripwire breach
             for _, side in ipairs({SIDE_BLUE, SIDE_RED}) do
-                local players = coalition.getPlayers(side) or {}
-                for _, u in ipairs(players) do
+                local candidates = {}
+                for _, u in ipairs(coalition.getPlayers(side) or {}) do
+                    table.insert(candidates, u)
+                end
+                if Group and Group.Category and Group.Category.HELICOPTER then
+                    for _, grp in ipairs(coalition.getGroups(side, Group.Category.HELICOPTER) or {}) do
+                        if grp and grp:isExist() then
+                            for _, u in ipairs(grp:getUnits() or {}) do
+                                table.insert(candidates, u)
+                            end
+                        end
+                    end
+                end
+                for _, u in ipairs(candidates) do
                     if u and u:isExist() then
                         local pos = u:getPoint()
                         local dist = math.sqrt((pos.x - sec.pos.x)^2 + (pos.z - sec.pos.z)^2)
@@ -205,9 +217,10 @@ function BF.ProcessSectorsAndLogistics()
                             local altAGL = pos.y - land.getHeight({x = pos.x, y = pos.z})
                             local vel = u:getVelocity()
                             local speed = math.sqrt(vel.x^2 + vel.y^2 + vel.z^2)
+                            local pilotLabel = (u.getPlayerName and u:getPlayerName()) or (u.getName and u:getName()) or "Tactical Logistics"
 
                             -- Landed or low-speed tactical touchdown
-                            if (not u:inAir()) or (altAGL < 25 and speed < 35) then
+                            if (not u:inAir()) or (altAGL < 45 and speed < 40) then
                                 if side == atkSide then
                                     -- ATTACKER CAPTURE & FORTIFICATION!
                                     sec.status = "DEFENDED"
@@ -216,7 +229,7 @@ function BF.ProcessSectorsAndLogistics()
 
                                     local teamName = (atkSide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
                                     local fortMsg = string.format("🛡 SECTOR CAPTURED & FORTIFIED (%s): %s has been secured by %s!\nFresh SHORAD, AAA & MANPADS garrison deployed to LZ! Production fully online!",
-                                        teamName, secName, u:getPlayerName() or "Tactical Logistics")
+                                        teamName, secName, pilotLabel)
                                     BF.Broadcast(fortMsg, nil, 16)
 
                                     BF.SpawnSectorPointDefense(secName, atkSide)
@@ -231,7 +244,7 @@ function BF.ProcessSectorsAndLogistics()
 
                                     local teamName = (defSide == SIDE_BLUE) and "BLUFOR" or "REDFOR"
                                     local saveMsg = string.format("★ BASE SAVED (%s): %s counter-logistics touched down at %s!\nGarrison re-established! Enemy capture thwarted!",
-                                        teamName, u:getPlayerName() or "Counter-Logistics", secName)
+                                        teamName, pilotLabel, secName)
                                     BF.Broadcast(saveMsg, nil, 16)
 
                                     BF.SpawnSectorPointDefense(secName, defSide)

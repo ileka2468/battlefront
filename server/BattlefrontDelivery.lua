@@ -19,6 +19,7 @@ do
         local receiptTemp = directory .. 'battlefront_delivery.receipt.tmp'
         local guardTemp = directory .. 'battlefront_delivery.applying.tmp'
         local capabilityTemp = directory .. 'battlefront_delivery.capability.tmp'
+        local historyDirectory = directory .. 'battlefront_delivery.history/'
         local capability = 'BF3 VIPER_D_READY\n'
         local overlay = 'C:/DCS_server/CoreMods/aircraft/AircraftWeaponPack/aim120_family.lua'
         -- The staging script pins the approved copied game data. The default is disabled.
@@ -28,6 +29,9 @@ do
         local baseName, baseID, blue = 'Mineralnye Vody', 26, 2
         local groupID, unitID = 1401, 1402
         local campaignProfile = false
+        local batchProfile = false
+        local protocol = batchProfile and 'BF4' or 'BF3'
+        local stockLimit = 12
         local pilotPath = 'C:/DCS_configs/DCS.server1/Scripts/BattlefrontViperPilot.ucid'
         -- This private overlay replaces the game B slot with the virtual D. Do not treat stock B as D.
         local resource = 'weapons.missiles.AIM_120'
@@ -55,6 +59,48 @@ do
                 for entry in listDeliveryDirectory(directory) do
                     count = count + 1
                     if count > 32 or type(entry) ~= 'string' or entry == wanted then return false end
+                end
+                return true
+            end)
+            return ok and absent
+        end
+
+        local function historyAvailable()
+            if type(listDeliveryDirectory) ~= 'function' then return false end
+            local ok, readable = pcall(function()
+                local iterator, handle = listDeliveryDirectory(historyDirectory)
+                if type(iterator) ~= 'function' then return false end
+                local entry = iterator(handle)
+                if handle then pcall(function() handle:close() end) end
+                return entry == nil or type(entry) == 'string'
+            end)
+            return ok and readable
+        end
+
+        local function retiredAbsent(id)
+            if not batchProfile then return true end
+            if not id or #id ~= 32 or not id:match('^[0-9a-f]+$')
+                    or type(listDeliveryDirectory) ~= 'function' then return false end
+            local name = id .. '.retired'
+            local path = historyDirectory .. name
+            local file, why, errno = open(path, 'rb')
+            if file then pcall(file.close, file); return false end
+            local reportedMissing = type(why) == 'string' and
+                (why:find('No such file or directory', 1, true) or why:find('The system cannot find the file specified', 1, true))
+            local opaqueSSE = why == nil or why == ('can\'t open "' .. path .. '" for \'rb\'')
+            if errno ~= 2 and not (errno == nil and (reportedMissing or opaqueSSE)) then return false end
+            -- An absent file and a missing directory can both report ENOENT.
+            -- Require a positive listing of the fixed private history directory.
+            -- Full/unknown listings fail closed; never age out a replay tombstone.
+            local ok, absent = pcall(function()
+                local count = 0
+                local iterator, handle = listDeliveryDirectory(historyDirectory)
+                for entry in iterator, handle do
+                    count = count + 1
+                    if count > 8192 or type(entry) ~= 'string' or entry:lower() == name then
+                        if handle then pcall(function() handle:close() end) end
+                        return false
+                    end
                 end
                 return true
             end)
@@ -119,25 +165,31 @@ do
         end
 
         local function parseRequest(data)
-            local id = data and data:match('^BF3 ([0-9a-f]+) AIM%-120D\n$')
-            if id and #id == 32 then return id end
+            if not data then return end
+            local id, qty
+            if batchProfile then
+                id, qty = data:match('^BF4 ([0-9a-f]+) AIM%-120D ([1-6])\n$')
+            else
+                id, qty = data:match('^BF3 ([0-9a-f]+) AIM%-120D\n$'), 1
+            end
+            if id and #id == 32 then return id, tonumber(qty) end
         end
 
         local function parseGuard(data)
-            local id = data and data:match('^BF3 ([0-9a-f]+) APPLYING\n$')
+            local id = data and data:match('^' .. protocol .. ' ([0-9a-f]+) APPLYING\n$')
             if id and #id == 32 then return id end
         end
 
         local function parseReceipt(data)
             if not data then return end
-            local id, status, before, after = data:match('^BF3 ([0-9a-f]+) ([A-Z]+) (-?%d+) (-?%d+) [a-z][a-z0-9_]*\n$')
+            local id, status, before, after = data:match('^' .. protocol .. ' ([0-9a-f]+) ([A-Z]+) (-?%d+) (-?%d+) [a-z][a-z0-9_]*\n$')
             if id and #id == 32 and statuses[status] and #before <= 10 and #after <= 10 then
-                return id, status
+                return id, status, tonumber(before)
             end
         end
 
         local function reply(id, state, before, after, reason, replace)
-            local data = string.format('BF3 %s %s %d %d %s\n', id, state, before, after, reason)
+            local data = string.format('%s %s %s %d %d %s\n', protocol, id, state, before, after, reason)
             return publish(receiptPath, receiptTemp, data, replace)
         end
 
@@ -236,9 +288,10 @@ do
         end
 
         local function process(now)
-            if not signature() or overlayBytes == 0 then return end
+            if not signature() or overlayBytes == 0 or (batchProfile and (not campaignProfile or baseID ~= 31)) then return end
             if not matchesOverlay() or (campaignProfile and
-                    (not getPlayerList or not getPlayerInfo or not approvedPilotID())) then
+                    (not getPlayerList or not getPlayerInfo or not approvedPilotID()))
+                    or (batchProfile and not historyAvailable()) then
                 withdrawCapability()
                 return
             end
@@ -246,7 +299,8 @@ do
                 local warehouse = nativeWarehouse()
                 if not warehouse then return false end
                 local count = stock(warehouse)
-                return count ~= nil and (not campaignProfile or count == 0)
+                return count ~= nil and ((batchProfile and count < stockLimit)
+                    or (not batchProfile and (not campaignProfile or count == 0)))
             end)
             local capabilityReady = false
             if stockKnown and eligible then
@@ -260,20 +314,25 @@ do
                 withdrawCapability()
             end
             local request = read(requestPath)
-            local id = parseRequest(request)
+            local id, qty = parseRequest(request)
             if not id then return end
             local guard, guardState = read(guardPath)
             local receipt, receiptState = read(receiptPath)
             local guardedID = parseGuard(guard)
-            local receiptID, state = parseReceipt(receipt)
+            local receiptID, state, receiptBefore = parseReceipt(receipt)
             if (guardState ~= 'missing' and guardedID ~= id)
                 or (receiptState ~= 'missing' and receiptID ~= id) then return end
             if state and state ~= 'APPLYING' then return end
-            local marker = 'BF3 ' .. id .. ' APPLYING\n'
+            if not retiredAbsent(id) then return end
+            local marker = protocol .. ' ' .. id .. ' APPLYING\n'
             if guardedID or state == 'APPLYING' then
                 -- Missing terminal evidence after a process restart is never permission to apply again.
                 if not guardedID and not publish(guardPath, guardTemp, marker, false) then return end
-                reply(id, 'REVIEW', 0, -1, 'interrupted', receiptState == 'present')
+                local initial = 0
+                if batchProfile then
+                    initial = receiptBefore and receiptBefore >= 0 and receiptBefore <= stockLimit and receiptBefore or -1
+                end
+                reply(id, 'REVIEW', initial, -1, 'interrupted', receiptState == 'present')
                 return
             end
 
@@ -285,23 +344,34 @@ do
             end
             local known, before = pcall(stock, warehouse)
             if not known or before == nil then return reply(id, 'REJECTED', -1, -1, 'stock_unavailable') end
-            if before ~= 0 then return reply(id, 'REJECTED', before, before, 'stock_not_zero') end
+            if batchProfile and before + qty > stockLimit then
+                return reply(id, 'REJECTED', before, before, 'stock_limit')
+            end
+            if not batchProfile and before ~= 0 then return reply(id, 'REJECTED', before, before, 'stock_not_zero') end
             if not capabilityReady then return end
 
             if not publish(guardPath, guardTemp, marker, false) then return end
-            if not reply(id, 'APPLYING', 0, -1, 'prewrite') then return end
+            if not reply(id, 'APPLYING', before, -1, 'prewrite') then return end
+            if batchProfile then
+                local allowed, currentWarehouse = pcall(setup)
+                if not allowed or not currentWarehouse then
+                    return reply(id, 'REVIEW', before, -1, 'write_uncertain', true)
+                end
+                warehouse = currentWarehouse
+            end
             local fresh, recheck = pcall(stock, warehouse)
-            if read(requestPath) ~= request or not fresh or recheck ~= 0 or not matchesOverlay()
-                    or not approvedPilotAtSlot() then
-                return reply(id, 'REVIEW', 0, -1, 'write_uncertain', true)
+            if read(requestPath) ~= request or not fresh or recheck ~= before or not matchesOverlay()
+                    or not approvedPilotAtSlot() or not retiredAbsent(id) then
+                return reply(id, 'REVIEW', before, -1, 'write_uncertain', true)
             end
 
-            local applied, result = pcall(function() return warehouse:addItem(resource, 1) end)
+            local expected = before + qty
+            local applied, result = pcall(function() return warehouse:addItem(resource, qty) end)
             local verified, after = pcall(stock, warehouse)
-            if applied and result ~= false and verified and after == 1 then
-                reply(id, 'READY', 0, 1, 'verified', true)
+            if applied and result ~= false and verified and after == expected then
+                reply(id, 'READY', before, expected, 'verified', true)
             else
-                reply(id, 'REVIEW', 0, verified and after or -1, 'write_uncertain', true)
+                reply(id, 'REVIEW', before, verified and after or -1, 'write_uncertain', true)
             end
         end
 
