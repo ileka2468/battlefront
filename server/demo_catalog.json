@@ -1,18 +1,14 @@
 {
   "AIM-120D": {
     "name": "AIM-120D AMRAAM",
-    "type": "Extended Range Fox-3",
+    "type": "Modded DCS munition",
     "coalition": "BLUFOR",
     "cost_points": 4,
-    "range_km": 140,
-    "mach": 4.0,
+    "recording_profile": "viper-d-recording",
     "compatible": [
-      "F-15C",
-      "F-16C_50",
-      "FA-18C_hornet",
-      "F-22A"
+      "F-16C_50"
     ],
-    "desc": "Two-way datalink and GPS-guided navigation enhancement to standard AMRAAM envelope."
+    "desc": "Regular companion inventory item. DCS delivery requires the private Viper AIM-120D recording profile, which uses the stock AIM-120B slot. The stock Viper does not support the AIM-120D."
   },
   "AGM-88C": {
     "name": "AGM-88C HARM",

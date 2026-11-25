@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 from unittest.mock import patch
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import refresh_web_release as release
@@ -38,6 +39,8 @@ class ReleaseUpdaterTests(unittest.TestCase):
         self.state.mkdir()
         self.old = {name: b"# prior release\n" for name in release.FILES}
         self.new = {name: b"# new release\n" for name in release.FILES}
+        self.old[release.CATALOG_FILE] = b'{"older": {}}\n'
+        self.new[release.CATALOG_FILE] = b'{"AIM-120C": {"coalition": "BLUFOR"}}\n'
         for name, contents in self.old.items():
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,8 +101,28 @@ class ReleaseUpdaterTests(unittest.TestCase):
         raw = package(broken)
         with self.assertRaises(SyntaxError):
             release.checked_archive(raw, release.sha256(raw))
+        for bad_catalog in (b'not json', b'[]', b'{"munition": false}'):
+            invalid = package({**self.new, release.CATALOG_FILE: bad_catalog})
+            with self.assertRaises(ValueError):
+                release.checked_archive(invalid, release.sha256(invalid))
         self.assertEqual(self.runtime(), self.old)
         self.assertFalse((self.state / "pending").exists())
+
+    def test_legacy_archive_and_previous_backup_leave_existing_catalog_untouched(self):
+        legacy = {name: value for name, value in self.new.items() if name != release.CATALOG_FILE}
+        raw = package(legacy)
+        digest = release.sha256(raw)
+        self.assertEqual(release.checked_archive(raw, digest), legacy)
+        release.apply_release(self.root, self.state, legacy, digest, lambda: None)
+        self.assertTrue(release.installed(self.root, self.state, digest))
+        self.assertEqual(self.runtime()[release.CATALOG_FILE], self.old[release.CATALOG_FILE])
+        with zipfile.ZipFile(self.state / 'previous-web.zip', 'w') as prior:
+            prior.writestr('manifest.json', json.dumps({name: 0o644 for name in release.REQUIRED_FILES}))
+            for name in release.REQUIRED_FILES:
+                prior.writestr(name, self.old[name])
+        release.atomic(self.state / 'pending', b'fixture')
+        release.restore(self.root, self.state, lambda: None)
+        self.assertEqual(self.runtime(), self.old)
 
     def test_install_then_verify_hashes_and_preserve_unrelated_file(self):
         scopes = []
