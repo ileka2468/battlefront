@@ -113,7 +113,7 @@ class TacviewVisualizer {
     this.missileCache = new Map();
     this.contactTextures = new Map();
     this.replay = null;
-    this.speed = 4;
+    this.speed = 1;
     this.seekPending = false;
     this.followNextLaunch = false;
     this.cameraPreset = "engagement";
