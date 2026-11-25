@@ -45,6 +45,8 @@ jobs:
           luac5.1 -p server/BattlefrontCampaignLoader.lua
           luac5.1 -p server/BattlefrontViperSlotGuard.lua
           lua5.1 scripts/verify_viper_slot_guard.lua
+          luac5.1 -p server/BattlefrontAccountLink.lua
+          lua5.1 scripts/verify_battlefront_account_link.lua
           { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,aircraft,economy,ai_director}.lua scripts/verify_director_progression.lua; } | lua5.1 -
           { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,ai_director}.lua scripts/verify_aircap.lua; } | lua5.1 -
       - name: Test durable workspace and deployment edge

@@ -57,12 +57,14 @@ DEMO_ACTIONS = {"/api/player/set_callsign", "/api/demo/grant_merits", "/api/requ
                 "/api/operations/join", "/api/operations/leave", "/api/operations/propose",
                 "/api/operations/command", "/api/operations/launch", "/api/upgrades/purchase"}
 WORKSPACE_ACTIONS = (DEMO_ACTIONS - {"/api/demo/grant_merits", "/api/upgrades/purchase"}) | {
-    "/api/marketplace/cancel", "/api/workspace/login", "/api/workspace/logout", "/api/dcs/deliver"}
+    "/api/marketplace/cancel", "/api/workspace/login", "/api/workspace/logout", "/api/dcs/deliver",
+    "/api/workspace/signup", "/api/dcs/link/start", "/api/dcs/link/finish"}
 CALLSIGN = re.compile(r"[A-Za-z0-9 _-]{1,24}")
 SESSIONS = {}
 STATE_LOCK = RLock()
 LOGIN_LOCK = Lock()
 LOGIN_TIMES = deque()
+SIGNUP_TIMES = deque()
 if WORKSPACE:
     from workspace_store import DELIVERY_AIRFIELD, WorkspaceError, WorkspaceStore, SESSION_SECONDS
     database = os.environ.get("BF_WORKSPACE_DB", str(Path.home() / ".local/state/battlefront/workspace.sqlite3"))
@@ -72,7 +74,10 @@ if WORKSPACE:
     workspace = WorkspaceStore(database, accounts, catalog,
         delivery_dir=os.environ.get("BF_DCS_DELIVERY_DIR"),
         delivery_account=os.environ.get("BF_DCS_DELIVERY_ACCOUNT"),
-        delivery_airfield=os.environ.get("BF_DCS_DELIVERY_AIRFIELD", DELIVERY_AIRFIELD))
+        delivery_airfield=os.environ.get("BF_DCS_DELIVERY_AIRFIELD", DELIVERY_AIRFIELD),
+        link_dir=os.environ.get("BF_DCS_LINK_DIR"),
+        linked_delivery_pilot_file=os.environ.get("BF_DCS_DELIVERY_LINK_PILOT_FILE"),
+        linked_delivery_merits=int(os.environ.get("BF_DCS_LINK_DEMO_MERITS", "0")))
     planning_sectors = json.loads((Path(WEB_DIR) / "sectors.json").read_text(encoding="utf-8"))
 elif DEMO:
     demo_root = tempfile.TemporaryDirectory(prefix="battlefront-demo-")
@@ -338,15 +343,18 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
                 raise WorkspaceError("Invalid JSON.")
             if not isinstance(body, dict) or any(type(v) not in (str, int, type(None)) for v in body.values()):
                 raise WorkspaceError("Expected a JSON object with scalar fields.")
-            if self.path == "/api/workspace/login":
+            if self.path in ("/api/workspace/login", "/api/workspace/signup"):
+                signup = self.path == "/api/workspace/signup"
                 with LOGIN_LOCK:
+                    times, limit = (SIGNUP_TIMES, 12) if signup else (LOGIN_TIMES, 60)
                     now = time.monotonic()
-                    while LOGIN_TIMES and now - LOGIN_TIMES[0] > 60:
-                        LOGIN_TIMES.popleft()
-                    if len(LOGIN_TIMES) >= 60:
-                        raise WorkspaceError("Sign-in busy. Try again shortly.", 429)
-                    LOGIN_TIMES.append(now)
-                self.workspace_cookie = workspace.login(body.get("username"), body.get("password"))
+                    while times and now - times[0] > 60:
+                        times.popleft()
+                    if len(times) >= limit:
+                        raise WorkspaceError("Authentication busy. Try again shortly.", 429)
+                    times.append(now)
+                authenticate = workspace.signup if signup else workspace.login
+                self.workspace_cookie = authenticate(body.get("username"), body.get("password"))
                 self._send_json({"success": True})
                 return
             token = self._workspace_token()
@@ -360,6 +368,10 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
                 workspace.logout(token)
                 self.workspace_cookie = ""
                 result = {"success": True}
+            elif self.path == "/api/dcs/link/start":
+                result = workspace.start_link(session)
+            elif self.path == "/api/dcs/link/finish":
+                result = workspace.finish_link(session, body.get("code"))
             else:
                 sectors, _ = self._workspace_sectors() if self.path == "/api/operations/propose" else ([], None)
                 result = workspace.mutate(self.path, session, body, sectors)
