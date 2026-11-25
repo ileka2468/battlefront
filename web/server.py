@@ -77,7 +77,8 @@ if WORKSPACE:
         delivery_airfield=os.environ.get("BF_DCS_DELIVERY_AIRFIELD", DELIVERY_AIRFIELD),
         link_dir=os.environ.get("BF_DCS_LINK_DIR"),
         linked_delivery_pilot_file=os.environ.get("BF_DCS_DELIVERY_LINK_PILOT_FILE"),
-        linked_delivery_merits=int(os.environ.get("BF_DCS_LINK_DEMO_MERITS", "0")))
+        linked_delivery_merits=int(os.environ.get("BF_DCS_LINK_DEMO_MERITS", "0")),
+        delivery_batch=os.environ.get("BF_DCS_DELIVERY_BATCH") == "1")
     planning_sectors = json.loads((Path(WEB_DIR) / "sectors.json").read_text(encoding="utf-8"))
 elif DEMO:
     demo_root = tempfile.TemporaryDirectory(prefix="battlefront-demo-")

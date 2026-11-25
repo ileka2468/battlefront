@@ -33,7 +33,7 @@ function Btn({children, kind='outline', className='', type='button', ...props}) 
 }
 function Side({side}) { return <span className={+side===2?'badge-blue':'badge-red'}>{sideName(side)}</span>; }
 function Heading({title,note,children}) {
-  return <header className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Battlefront / workspace</p><h1 className="page-title">{title}</h1><p className="mt-1 max-w-3xl text-sm text-muted">{note}</p></div>{children}</header>;
+  return <header className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Battlefront / workspace</p><h1 className="page-title">{title}</h1>{note&&<p className="mt-1 max-w-3xl text-sm text-muted">{note}</p>}</div>{children}</header>;
 }
 function Card({children,className=''}) { return <div className={`bf-card ${className}`}>{children}</div>; }
 function Empty({children}) { return <div className="border border-dashed border-line p-6 text-center text-sm text-muted">{children}</div>; }
@@ -112,8 +112,9 @@ function Operations({campaign,player,pilotId,action,open,disabled,production,can
   const isCommander = Boolean(pilotId) && commander === pilotId;
   const scheduled = op?.status === 'SCHEDULED' || op?.status === 'ACTIVE';
   const slots = op?.slots || [];
+  const briefing = typeof op?.objective_desc === 'string' && !/^\s*Coalition briefing only\./i.test(op.objective_desc) ? op.objective_desc : '';
   return <section id="operationsTab">
-    <Heading title="Flight operations" note="Propose a coalition plan and reserve roster slots. Scheduling saves the plan here; it does not launch a DCS flight.">
+    <Heading title="Flight operations">
       <div className="flex flex-wrap gap-2">
         <Btn onClick={()=>open({type:'operation'})} disabled={disabled||production&&op?.status==='PLANNED'}>Propose target</Btn>
         {(!production||canCommand)&&<Btn onClick={()=>action('/api/operations/command',{side},'Command updated.')} disabled={disabled||Boolean(commander&&!isCommander)}>{isCommander?'Relinquish command':'Take coalition command'}</Btn>}
@@ -124,8 +125,8 @@ function Operations({campaign,player,pilotId,action,open,disabled,production,can
         <div><p className="eyebrow">{op.status} · {op.target_quadrant}</p><h2 className="text-2xl font-semibold">{op.name}</h2><p className="text-sm text-muted">{op.target_sector} · {op.frequency} · {op.coordinator}</p></div>
         {(!production||canCommand&&isCommander)&&<Btn kind="primary" disabled={disabled||scheduled||production&&!slots.some(slot=>slot.pilot)} onClick={()=>action('/api/operations/launch',{side},'Flight plan scheduled.')}>{scheduled?'Plan scheduled':'Confirm flight plan'}</Btn>}
       </div>
-      <p className="my-4 border-l-2 border-emerald-800 bg-field p-3 text-sm text-muted">{op.objective_desc}</p>
-      <h3 className="mb-3 font-semibold">Flight roster</h3>
+      {briefing&&<p className="mt-4 border-l-2 border-emerald-800 bg-field p-3 text-sm text-muted">{briefing}</p>}
+      <h3 className="my-3 font-semibold">Flight roster</h3>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{slots.map((slot,i)=>{
         const mine = Boolean(pilotId) && (slot.pilot===pilotId || !production&&slot.pilot===player.callsign);
         return <Card key={slot.role_title+'-'+i} className="flex min-h-34 flex-col justify-between gap-2">
@@ -137,31 +138,66 @@ function Operations({campaign,player,pilotId,action,open,disabled,production,can
   </section>;
 }
 
+function advertisedDcsQuantity(delivery) {
+  const quantity = delivery?.max_quantity;
+  return Number.isInteger(quantity) && quantity >= 1 ? Math.min(6, quantity) : null;
+}
+
+function settledDcsDelivery(status) {
+  return status === 'ready' || status === 'rejected';
+}
+
 function DcsDeliveryStatus({delivery}) {
   const airfield = delivery.airfield || 'Mineralnye Vody';
   const item = delivery.item;
   const viperMod = item === 'AIM-120D';
+  const maxQuantity = advertisedDcsQuantity(delivery);
+  const count = Number.isInteger(delivery.quantity) && delivery.quantity >= 1 && delivery.quantity <= 6
+    ? delivery.quantity : maxQuantity === null ? 1 : null;
+  const amount = count === 1 ? 'One' : count;
+  const shippedItem = `${viperMod ? 'modded ' : ''}${item}${count > 1 ? ' rounds' : ''}`;
   const details = {
-    idle: ['Demo airfield delivery', `Send one ${item} from your armory to ${airfield}. This uses one item you already own; there is no second merit charge.`],
-    pending: ['Awaiting DCS confirmation', `One ${item} is held from your inventory until DCS confirms delivery. It is not ready to rearm yet.`],
-    ready: ['Ready to rearm at the demo airfield', `DCS confirmed one ${viperMod ? 'modded ' : ''}${item} in base stock at ${airfield}. When parked there, use Rearm & Refuel in DCS. Your aircraft loadout was not changed automatically.`],
-    rejected: ['DCS delivery rejected', 'DCS did not accept the delivery. Check your armory; this demo order will not retry automatically.'],
+    idle: ['Demo airfield delivery', `Send ${maxQuantity > 1 ? `up to ${maxQuantity} ${item} rounds` : `one ${item}`} from your armory to ${airfield}. Delivery uses items you already own; there is no second merit charge.`],
+    pending: ['Awaiting DCS confirmation', `${count ? `${amount} ${item}${count > 1 ? ' rounds are' : ' is'}` : `Your ${item} delivery is`} held from your inventory until DCS confirms delivery. It is not ready to rearm yet.`],
+    ready: ['Ready to rearm at the demo airfield', `DCS confirmed ${count ? `${count === 1 ? 'one' : count} ${shippedItem}` : `the ${item} delivery`} in base stock at ${airfield}. When parked there, use Rearm & Refuel in DCS. Your aircraft loadout was not changed automatically.`],
+    rejected: ['DCS delivery not completed', `The requested items are back in your armory. ${maxQuantity !== null && delivery.can_send === true ? 'You can send a new order.' : 'This order will not retry automatically.'}`],
     review: ['Delivery held for review', `The ${item} is still reserved and delivery has not been confirmed. Do not resend or try to rearm from this order.`],
   };
   const detail = Object.hasOwn(details, delivery.status) ? details[delivery.status] : null;
   if (!detail) return null;
   return <aside role="status" aria-atomic="true" className="mb-4 border border-line bg-panel px-4 py-3" id="dcs-delivery-status">
-    <p className="eyebrow">DCS delivery · separate from your loadout plan</p><strong className="mt-1 block">{detail[0]}</strong><p className="mt-1 text-sm text-muted">{detail[1]}</p>
+    <p className="eyebrow">DCS delivery</p><strong className="mt-1 block">{detail[0]}</strong><p className="mt-1 text-sm text-muted">{detail[1]}</p>
     {viperMod&&['idle','pending','ready'].includes(delivery.status)&&<p className="mt-3 border-l-4 border-signal bg-field px-3 py-2 text-sm"><strong>DCS may show AIM-120B.</strong> The private Viper recording mod puts the AIM-120D in the stock AIM-120B slot. This is not native AIM-120D support.</p>}
   </aside>;
 }
 
+function DcsDeliveryControl({delivery, owned, disabled, action}) {
+  const [requested,setRequested] = useState(1);
+  const limit = advertisedDcsQuantity(delivery);
+  const max = Math.min(limit ?? 1, owned);
+  const quantity = Math.min(requested, max);
+  if (!Number.isInteger(max) || max < 1) return null;
+  return <>
+    {limit > 1 && <label className="bf-label">
+      Quantity to send
+      <select className="bf-field" value={quantity} onChange={event=>setRequested(Number(event.target.value))} disabled={disabled}>
+        {Array.from({length:max},(_,i)=><option key={i+1} value={i+1}>{i+1}</option>)}
+      </select>
+    </label>}
+    <Btn kind="primary" disabled={disabled} onClick={()=>action('/api/dcs/deliver',
+      limit === null ? {munition:delivery.item} : {munition:delivery.item,quantity},
+      'Delivery requested. Awaiting DCS confirmation.')}>Send to DCS</Btn>
+  </>;
+}
+
 function Armory({player,catalog,action,open,disabled,delivery}) {
   const items=Object.entries(player.inventory||{}).filter(([,n])=>n>0);
-  const sendable = delivery?.status==='idle' ? delivery.item : null;
-  return <section id="armoryTab"><Heading title="Personal armory" note={delivery?"Manage your companion inventory. Loadout plans do not change DCS aircraft; the separate delivery action can add one item to the demo airfield's stock.":"Manage persistent companion inventory, choose a planned loadout, or list items for trade. Nothing here changes a DCS aircraft."}><Btn id="openSellModalBtn" kind="primary" onClick={()=>open({type:'sell'})} disabled={disabled||!items.length}>Create sell order</Btn></Heading>
+  const canSend = (delivery?.status==='idle' && delivery.can_send!==false) ||
+    (settledDcsDelivery(delivery?.status) && advertisedDcsQuantity(delivery)!==null && delivery.can_send===true);
+  const sendable = canSend ? delivery.item : null;
+  return <section id="armoryTab"><Heading title="Personal armory" note={delivery?"Manage your inventory, list items for trade, or send eligible items to the DCS airfield.":"Manage your inventory and list items for trade."}><Btn id="openSellModalBtn" kind="primary" onClick={()=>open({type:'sell'})} disabled={disabled||!items.length}>Create sell order</Btn></Heading>
     {delivery&&<DcsDeliveryStatus delivery={delivery}/>}
-    {items.length?<div className="card-grid">{items.map(([key,n])=><Card key={key}><p className="eyebrow">{key} · {n} in stock</p><h2 className="my-1 text-xl font-semibold">{catalog[key]?.name||key}</h2><p className="mb-4 text-sm text-muted">{catalog[key]?.type||'Inventory item'}</p><div className="flex flex-wrap gap-2"><Btn disabled={disabled||Boolean(player.planned_loadout?.[key])} onClick={()=>action('/api/armory/mount',{munition:key},'Added to planned loadout.')}>{player.planned_loadout?.[key]?'In planned loadout':'Add to loadout plan'}</Btn><Btn disabled={disabled} onClick={()=>open({type:'sell',item:key})}>List for sale</Btn>{key===sendable&&<Btn kind="primary" disabled={disabled} onClick={()=>action('/api/dcs/deliver',{munition:key},'Delivery requested. Awaiting DCS confirmation.')}>Send to DCS</Btn>}</div></Card>)}</div>:<Empty>No items in your armory. Visit the munitions depot to add inventory.</Empty>}
+    {items.length?<div className="card-grid">{items.map(([key,n])=><Card key={key}><p className="eyebrow">{key} · {n} in stock</p><h2 className="my-1 text-xl font-semibold">{catalog[key]?.name||key}</h2><p className="mb-4 text-sm text-muted">{catalog[key]?.type||'Inventory item'}</p><div className="flex flex-wrap items-end gap-2"><Btn disabled={disabled} onClick={()=>open({type:'sell',item:key})}>List for sale</Btn>{key===sendable&&<DcsDeliveryControl key={delivery.order_id ?? 'new-delivery'} delivery={delivery} owned={n} disabled={disabled} action={action}/>}</div></Card>)}</div>:<Empty>No items in your armory. Visit the munitions depot to add inventory.</Empty>}
   </section>;
 }
 
@@ -282,7 +318,8 @@ function App() {
   const pilotId=production?(workspace.authenticated?workspace.player_id||'':''):localDemo?demoPilotId:'';
   const delivery=production&&workspace.authenticated&&pilotId&&typeof state?.delivery?.item==='string'?state.delivery:null;
   const deliveryStatus=delivery?.status, deliveryOrderId=delivery?.order_id;
-  const watchReadyProfile=section==='armory'&&delivery?.item==='AIM-120D'&&deliveryStatus==='idle';
+  const watchReadyProfile=section==='armory'&&delivery?.item==='AIM-120D'&&
+    (deliveryStatus==='idle'||(settledDcsDelivery(deliveryStatus)&&advertisedDcsQuantity(delivery)!==null));
   const player=state?.players?.[pilotId]||(localDemo&&demoPilot)||noPilot;
   const catalog=state?.munition_catalog||{};
   const orders=state?.marketplace||[];
