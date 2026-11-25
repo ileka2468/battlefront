@@ -546,7 +546,58 @@ class TelemetryEngine:
             cycle = int(elapsed / length)
             cursor = elapsed % length
             index = max(0,bisect_right(self.replay_times,cursor)-1)
-            frame = self.replay[index]
+            next_index = min(index + 1, len(self.replay) - 1)
+            f0, f1 = self.replay[index], self.replay[next_index]
+            t0, t1 = self.replay_times[index], self.replay_times[next_index]
+            mix = max(0.0, min(1.0, (cursor - t0) / (t1 - t0))) if t1 > t0 else 0.0
+
+            def mix_angle(a, b, t):
+                return (a + (((b - a + 180.0) % 360.0) - 180.0) * t) % 360.0
+
+            if mix > 0.0 and next_index != index:
+                u1_map = {u['id']: u for u in f1['units']}
+                interp_units = []
+                for u0 in f0['units']:
+                    u1 = u1_map.get(u0['id'])
+                    if u1 and abs(u1['x'] - u0['x']) < 5000 and abs(u1['z'] - u0['z']) < 5000:
+                        interp_units.append({
+                            **u0,
+                            'x': u0['x'] + (u1['x'] - u0['x']) * mix,
+                            'z': u0['z'] + (u1['z'] - u0['z']) * mix,
+                            'alt': u0['alt'] + (u1['alt'] - u0['alt']) * mix,
+                            'speed_kts': u0['speed_kts'] + (u1['speed_kts'] - u0['speed_kts']) * mix,
+                            'heading': mix_angle(u0['heading'], u1['heading'], mix),
+                            'pitch': u0.get('pitch', 0.0) + (u1.get('pitch', 0.0) - u0.get('pitch', 0.0)) * mix,
+                            'roll': mix_angle(u0.get('roll', 0.0), u1.get('roll', 0.0), mix),
+                        })
+                    else:
+                        interp_units.append(u0)
+                m1_map = {m['id']: m for m in f1.get('missiles', [])}
+                interp_missiles = []
+                for m0 in f0.get('missiles', []):
+                    m1 = m1_map.get(m0['id'])
+                    if m1 and abs(m1['x'] - m0['x']) < 8000 and abs(m1['z'] - m0['z']) < 8000:
+                        interp_missiles.append({
+                            **m0,
+                            'x': m0['x'] + (m1['x'] - m0['x']) * mix,
+                            'z': m0['z'] + (m1['z'] - m0['z']) * mix,
+                            'alt': m0['alt'] + (m1['alt'] - m0['alt']) * mix,
+                            'speed_kts': m0['speed_kts'] + (m1['speed_kts'] - m0['speed_kts']) * mix,
+                            'heading': mix_angle(m0['heading'], m1['heading'], mix),
+                            'pitch': m0.get('pitch', 0.0) + (m1.get('pitch', 0.0) - m0.get('pitch', 0.0)) * mix,
+                        })
+                    else:
+                        interp_missiles.append(m0)
+                frame = {
+                    **f0,
+                    'sim_time': self.replay[0]['sim_time'] + cursor,
+                    'seq': int(round(cursor * 1000)),
+                    'units': interp_units,
+                    'missiles': interp_missiles,
+                }
+            else:
+                frame = {**f0, 'sim_time': self.replay[0]['sim_time'] + cursor, 'seq': int(round(cursor * 1000))}
+
             tails = {m['id']:[] for m in frame['missiles']}
             if tails:
                 for prior in self.replay[max(0,index-40):index:2]:

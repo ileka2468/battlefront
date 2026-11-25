@@ -550,10 +550,9 @@ class TacviewVisualizer {
         }
         console.warn("Airspace update:",err);
       } finally {
-        // Keep one request in flight. Account for HTTP duration instead of
-        // adding the full socket delay to every polling interval.
-        const cadence=document.hidden ? 1000 : this.replay && this.speed===0 ? 500 : this.forceReplay ? 220 : 190;
-        this.telemetryTimer = setTimeout(fetchTelemetry,Math.max(30,cadence-(performance.now()-started)));
+        // Keep one request in flight. Poll replay at ~15 Hz locally for smooth 60 FPS pose buffering.
+        const cadence=document.hidden ? 1000 : this.replay && this.speed===0 ? 500 : (this.forceReplay || this.telemetryMode==="replay") ? 65 : 190;
+        this.telemetryTimer = setTimeout(fetchTelemetry,Math.max(25,cadence-(performance.now()-started)));
       }
     };
     fetchTelemetry();
@@ -606,15 +605,29 @@ class TacviewVisualizer {
     if (previousMode === this.telemetryMode && frameKey === this.snapshotKey && !this.seekPending) return;
     const oldKey = String(this.snapshotKey).split(":");
     const newKey = String(frameKey).split(":");
-    const discontinuity = this.seekPending || previousMode !== this.telemetryMode || (newKey.length >= 2 &&
-      (oldKey[0] !== newKey[0] || oldKey[2] !== newKey[2] || Number(newKey[1])<Number(oldKey[1]))) ||
-      (live && this.liveClock.latest && data.sim_time != null && data.sim_time < this.liveClock.latest.sim-.03);
+    const cycleWrapped = this.telemetryMode === "replay" && oldKey.length >= 2 && newKey.length >= 2 && oldKey[oldKey.length - 1] !== newKey[newKey.length - 1];
+    const discontinuity = this.seekPending || cycleWrapped || previousMode !== this.telemetryMode || (newKey.length >= 2 &&
+      (oldKey[0] !== newKey[0] || Number(newKey[1])<Number(oldKey[1]))) ||
+      (Number.isFinite(data.sim_time) && this.latestSimTime != null && data.sim_time < this.latestSimTime - .03);
     this.seekPending=false;
     this.snapshotKey = frameKey;
     const now = performance.now() / 1000;
-    if (discontinuity || (live && data.live_status==="waiting")) this.liveClock.reset();
+    if (discontinuity || (live && data.live_status==="waiting")) {
+      this.liveClock.reset();
+      this.replayClockSim = null;
+    }
     this.liveClock.held=held;
     const liveTime=live && Number.isFinite(data.sim_time) ? data.sim_time : null;
+    const poseTime=(live || this.telemetryMode === "replay") && Number.isFinite(data.sim_time) ? data.sim_time : null;
+    if (poseTime != null) {
+      this.latestSimTime = poseTime;
+      if (this.telemetryMode === "replay") {
+        if (this.replay && this.replay.simOrigin == null && data.playback) {
+          this.replay.simOrigin = poseTime - data.playback.cursor;
+        }
+        if (this.replayClockSim == null) this.replayClockSim = poseTime;
+      }
+    }
     if (liveTime!=null) {
       const stamp=Number.isFinite(data.capture_timestamp) ? data.capture_timestamp : data.timestamp-data.sample_age;
       this.liveClock.observe(liveTime,stamp,Number(newKey[1]),now,data.sample_age,roundTrip);
@@ -645,7 +658,7 @@ class TacviewVisualizer {
       record.targetPitch = u.pitch || 0;
       record.startRoll = record.currentRoll;
       record.targetRoll = u.roll || 0;
-      if (liveTime!=null) addLivePose(record,liveTime,pos.x,pos.y,pos.z,u.heading,u.pitch||0,u.roll||0,discontinuity);
+      if (poseTime!=null) addLivePose(record,poseTime,pos.x,pos.y,pos.z,u.heading,u.pitch||0,u.roll||0,discontinuity);
       if (discontinuity) {
         record.startPos.copy(record.targetPos);
         record.startHeading = record.targetHeading;
@@ -677,7 +690,7 @@ ${Math.round(u.alt * 3.28084 / 100) * 100}ft · ${Math.round(u.speed_kts / 5) * 
     }
     this.sortedAircraft = Array.from(this.aircraftUnits.entries()).sort(([a], [b]) => String(a).localeCompare(String(b)));
     this.updateContacts();
-    this.updateMissiles(data.missiles || [], discontinuity,liveTime);
+    this.updateMissiles(data.missiles || [], discontinuity, poseTime);
     if (this.followNextLaunch && this.missileMeshes.size) {
       this.followNextLaunch=false; this.trackNextMissile();
     }
@@ -1253,7 +1266,20 @@ ${Math.round(u.alt * 3.28084 / 100) * 100}ft · ${Math.round(u.speed_kts / 5) * 
     this.terrain.update(this.clock.elapsedTime);
     const now=performance.now()/1000;
     const t = Math.max(0, Math.min(1, (now-this.lastSnapshotAt)/this.snapshotInterval));
-    const playhead=this.telemetryMode==="live" ? this.liveClock.advance(now) : null;
+    let playhead=null;
+    if (this.telemetryMode==="live") {
+      playhead=this.liveClock.advance(now);
+    } else if (this.telemetryMode==="replay" && this.latestSimTime!=null) {
+      if (this.replayClockSim==null) this.replayClockSim=this.latestSimTime;
+      const target=this.latestSimTime-Math.min(.14,.075*Math.max(.5,this.speed||1));
+      const drift=target-this.replayClockSim;
+      if (Math.abs(drift)>.9) this.replayClockSim=target;
+      else if (this.speed>0) {
+        const rate=Math.max(.75,Math.min(1.25,1+drift*2.4));
+        this.replayClockSim=Math.min(this.latestSimTime+.06,this.replayClockSim+Math.min(dt,.1)*this.speed*rate);
+      }
+      playhead=this.replayClockSim;
+    }
     const occupied = [];
     const d=this.controls?this.camera.position.distanceTo(this.controls.target):75;
     this.camera.updateMatrixWorld();
