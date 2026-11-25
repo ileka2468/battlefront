@@ -64,14 +64,15 @@ STATE_LOCK = RLock()
 LOGIN_LOCK = Lock()
 LOGIN_TIMES = deque()
 if WORKSPACE:
-    from workspace_store import WorkspaceError, WorkspaceStore, SESSION_SECONDS
+    from workspace_store import DELIVERY_AIRFIELD, WorkspaceError, WorkspaceStore, SESSION_SECONDS
     database = os.environ.get("BF_WORKSPACE_DB", str(Path.home() / ".local/state/battlefront/workspace.sqlite3"))
     accounts = os.environ.get("BF_WORKSPACE_ACCOUNTS_FILE")
     default_catalog = Path(WEB_DIR).parent / "server/demo_catalog.json"
     catalog = json.loads(Path(os.environ.get("BF_WORKSPACE_CATALOG", default_catalog)).read_text(encoding="utf-8"))
     workspace = WorkspaceStore(database, accounts, catalog,
         delivery_dir=os.environ.get("BF_DCS_DELIVERY_DIR"),
-        delivery_account=os.environ.get("BF_DCS_DELIVERY_ACCOUNT"))
+        delivery_account=os.environ.get("BF_DCS_DELIVERY_ACCOUNT"),
+        delivery_airfield=os.environ.get("BF_DCS_DELIVERY_AIRFIELD", DELIVERY_AIRFIELD))
     planning_sectors = json.loads((Path(WEB_DIR) / "sectors.json").read_text(encoding="utf-8"))
 elif DEMO:
     demo_root = tempfile.TemporaryDirectory(prefix="battlefront-demo-")
