@@ -11,12 +11,14 @@ import mimetypes
 
 WEB = Path(__file__).resolve().parents[1] / 'web'
 MAX_REQUEST_BODY = 16384
-READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry'}
+READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry',
+        '/api/weather','/api/app-telemetry','/api/auth/oauth/status','/mcp','/mcp/app'}
 WRITE = {'/api/workspace/login','/api/workspace/logout','/api/workspace/signup',
          '/api/dcs/link/start','/api/dcs/link/finish','/api/player/set_callsign','/api/requisition',
          '/api/marketplace/list','/api/marketplace/buy','/api/marketplace/cancel','/api/armory/mount',
          '/api/operations/join','/api/operations/leave','/api/operations/propose',
-         '/api/operations/command','/api/operations/launch','/api/dcs/deliver'}
+         '/api/operations/command','/api/operations/launch','/api/dcs/deliver',
+         '/api/app-telemetry','/mcp'}
 STATIC = {'/','/index.html','/sectors.json','/tacview.js','/caucasus_terrain.js','/airframes.js',
           '/dist/companion.js','/dist/tailwind.css','/terrain/caucasus-height.png','/terrain/caucasus-relief.jpg',
           '/vendor/three.min.js','/vendor/OrbitControls.js','/vendor/GLTFLoader.js',
@@ -51,7 +53,8 @@ class Gateway(BaseHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header('X-Content-Type-Options','nosniff')
-        self.send_header('X-Frame-Options','DENY')
+        frame_policy = 'SAMEORIGIN' if urlsplit(getattr(self,'path','')).path=='/mcp/app' else 'DENY'
+        self.send_header('X-Frame-Options',frame_policy)
         self.send_header('Referrer-Policy','same-origin')
         super().end_headers()
 
@@ -125,7 +128,7 @@ class Gateway(BaseHTTPRequestHandler):
         if csrf and len(csrf)<256: headers['X-BF-CSRF']=csrf
         body=None
         if post:
-            if origin!=self.server.public_origin or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin'):
+            if path!='/mcp' and (origin!=self.server.public_origin or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin')):
                 return self.error(403,'Same-origin request required')
             if size is None: return self.error(411,'Request length is required')
             if self.headers.get_content_type()!='application/json': return self.error(415,'JSON is required')

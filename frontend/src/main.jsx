@@ -7,7 +7,7 @@ const localHost = ['localhost','127.0.0.1','[::1]'].includes(location.hostname);
 const tabGroups = [
   ['Campaign', [['tacview','Airspace','◎'],['operations','Flight operations','≡']]],
   ['Logistics', [['armory','Personal armory','▣'],['requisition','Munitions depot','◇'],['techTree','Airframe research','⊞'],['marketplace','Player exchange','⇄']]],
-  ['Records', [['leaderboard','Pilot standings','▤']]],
+  ['Records', [['leaderboard','Pilot standings','▤'],['telemetry','Telemetry & MCP','◈']]],
 ];
 const idFor = value => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_]/g,'_');
 const money = x => x == null ? '—' : `$${Number(x).toLocaleString('en-US',{maximumFractionDigits:2})}M`;
@@ -59,7 +59,7 @@ function TreasurySide({side, coalition, change}) {
   </div>;
 }
 
-function Theater({observation}) {
+function Theater({observation, weather}) {
   const {snapshot:feed,current:live,changes} = observation;
   const coalitions = feed?.coalitions || {};
   const blue = coalitions['2'], red = coalitions['1'];
@@ -69,7 +69,7 @@ function Theater({observation}) {
       <div className="mb-2 flex items-center justify-between gap-2"><span className="eyebrow">Sector control</span><span className={`eyebrow ${live?'text-emerald-700':''}`} id="campaignFeedStatus">{live?'LIVE DCS • READ ONLY':replay?'RECORDED AIRSPACE • NO TREASURY':feed?'DELAYED DCS • LAST KNOWN':'WAITING FOR DCS CAMPAIGN'}</span></div>
       <div className="flex items-center gap-3 font-mono text-[11px]"><span><Side side={2}/> <strong id="blueSectorCount">{blue?.controlled_sectors??'—'}</strong>/{total}</span><div className="flex h-2.5 min-w-6 flex-1 gap-px overflow-hidden bg-field"><span className="block bg-blue-600/65" style={{width:`${100*(blue?.controlled_sectors||0)/total}%`}}/><span className="block bg-red-600/60" style={{width:`${100*(red?.controlled_sectors||0)/total}%`}}/></div><span><strong id="redSectorCount">{red?.controlled_sectors??'—'}</strong>/{total} <Side side={1}/></span></div>
     </section><section className="border-t border-line pt-2 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6" aria-label="DCS coalition treasury"><div className="mb-2 flex justify-between"><span className="eyebrow">DCS coalition treasury</span>{feed&&<span className="eyebrow">Balance / income rate</span>}</div><div className="grid grid-cols-2 gap-2"><TreasurySide side={2} coalition={blue} change={changes['2']}/><TreasurySide side={1} coalition={red} change={changes['1']}/></div></section></div>
-    <p id="campaignWorkspaceNote" className="mt-2 text-[10px] text-muted">{replay?'The recording contains flight tracks, not campaign balances.':'Blueprints are paid for in DCS by the AI Director or via F10. Trading uses separate Companion Merits.'}</p>
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted"><p id="campaignWorkspaceNote">{replay?'The recording contains flight tracks, not campaign balances.':'Blueprints are paid for in DCS by the AI Director or via F10. Trading uses separate Companion Merits.'}</p>{weather?.live&&<span className="font-mono">Sochi WX ({weather.source}): {weather.temperature_c}°C · Wind {weather.wind_kt} kt @ {weather.wind_deg}°</span>}</div>
   </div>;
 }
 
@@ -87,7 +87,7 @@ const Airspace = memo(function Airspace({visible}) {
       {modes.map(([value,name])=><button key={value} type="button" className={`cam-preset-btn ${value==='engagement'?'active':''}`} data-camera-preset={value} aria-pressed={value==='engagement'} onClick={()=>window.tacview?.setCameraPreset(value)}>{name}</button>)}
       <button className="cam-preset-btn" id="bf-view-fullscreen" type="button">Full screen</button></div></div>
     <div className="fleet-transport flex flex-wrap items-center gap-2 border-x border-line bg-[#e3e6d9] px-3 py-2 font-mono text-xs"><button className="bf-missile-jump" id="bf-missile-jump" type="button" disabled>No active missiles</button>
-      <div id="bf-replay-controls" className="bf-replay-controls flex min-w-0 flex-1 items-center gap-2" hidden><button className="bf-btn bf-outline" id="bf-replay-restart" type="button">Restart</button><label className="hidden sm:inline" htmlFor="bf-replay-seek">REPLAY</label><input className="min-w-8 flex-1 accent-emerald-800" id="bf-replay-seek" aria-label="Seek recorded mission" type="range" min="0" max="1" step=".1" defaultValue="0"/><output id="bf-replay-time">0:00</output><select className="bf-field" id="bf-replay-speed" aria-label="Replay speed" defaultValue="4"><option value="0">Paused</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></div>
+      <div id="bf-replay-controls" className="bf-replay-controls flex min-w-0 flex-1 items-center gap-2" hidden><button className="bf-btn bf-outline" id="bf-replay-restart" type="button">Restart</button><label className="hidden sm:inline" htmlFor="bf-replay-seek">REPLAY</label><input className="min-w-8 flex-1 accent-emerald-800" id="bf-replay-seek" aria-label="Seek recorded mission" type="range" min="0" max="1" step=".1" defaultValue="0"/><output id="bf-replay-time">0:00</output><select className="bf-field" id="bf-replay-speed" aria-label="Replay speed" defaultValue="1"><option value="0">Paused</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></div>
       <label className="flex shrink-0 items-center gap-1"><input type="checkbox" id="bf-show-details"/> All labels</label>
     </div>
     <div className="relative overflow-hidden border border-ink bg-ink"><div id="tacviewContainer" className="tacview-canvas-container">{offline&&<p className="flex h-full items-center justify-center p-6 text-white">WebGL viewer unavailable in this browser.</p>}</div>
@@ -242,7 +242,31 @@ function Standings({players}) {
   return <section id="leaderboardTab"><Heading title="Pilot standings" note="Recorded stats for companion pilots. Personal merit balances are private."/><Table headers={['Rank','Pilot','Coalition','Air kills','Ground kills','Assists','Sorties','Merits']} rows={rows.map(([id,p],i)=>[id,[`#${i+1}`,p.callsign,<Side side={p.side}/>,p.stats?.a2a_kills||0,p.stats?.a2g_kills||0,p.stats?.datalink_assists||0,p.stats?.sorties||0,p.points==null?'—':p.points+' CM']])}/></section>;
 }
 
-function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,signup,startLink,finishLink,action}) {
+function TelemetryPanel() {
+  const [data,setData]=useState(null),[err,setErr]=useState('');
+  const load=async()=>{try{setErr('');setData(await request('/api/app-telemetry'));}catch(e){setErr(e.message);}};
+  useEffect(()=>{void load();},[]);
+  const events=data?.events||[], summary=data?.summary||{total:0,errors:0,avg_ms:0};
+  return <section id="telemetryTab">
+    <Heading title="Telemetry & MCP" note="Live API/UI observability log and Model Context Protocol endpoint.">
+      <Btn onClick={load}>Refresh</Btn>
+    </Heading>
+    {err&&<p className="mb-3 text-sm text-red-700">{err}</p>}
+    <div className="mb-4 grid gap-3 sm:grid-cols-3">
+      <Card><p className="eyebrow">Logged events</p><strong className="text-2xl tabular-nums">{summary.total}</strong></Card>
+      <Card><p className="eyebrow">HTTP 4xx/5xx</p><strong className="text-2xl tabular-nums">{summary.errors}</strong></Card>
+      <Card><p className="eyebrow">MCP endpoint</p><code className="font-mono text-xs">{location.origin}/mcp</code></Card>
+    </div>
+    <h2 className="mb-2 text-lg font-semibold">Application telemetry log</h2>
+    <Table headers={['Time (UTC)','Kind','Path / Event','Status','Detail']} empty="No telemetry events recorded yet."
+      rows={events.slice(0,25).map((e,i)=>[`${e.ts}-${i}`,[e.ts,e.kind,e.path,String(e.status),e.detail||'—']])}/>
+    <h2 className="mt-6 mb-2 text-lg font-semibold">MCP App iframe preview (/mcp/app)</h2>
+    <p className="mb-2 text-xs text-muted">Tools: <code>get_theater_status</code>, <code>get_sector_threat_picture</code>, <code>list_ordnance_orders</code>, <code>propose_flight_plan</code></p>
+    <iframe title="Battlefront MCP App" src="/mcp/app" className="h-72 w-full border border-line bg-white"/>
+  </section>;
+}
+
+function Modal({modal,close,player,catalog,campaign,busy,oauth,savePilot,login,signup,startLink,finishLink,action}) {
   const [item,setItem]=useState(modal.item||Object.keys(player.inventory||{}).find(k=>player.inventory[k]>0)||'');
   const [qty,setQty]=useState(1);
   const [price,setPrice]=useState(6);
@@ -278,6 +302,7 @@ function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,signup,
           <p className="text-sm text-muted">{modal.type==='signup'?'Choose a new Companion password. You’ll link DCS in the next step.':'Use your Battlefront Companion account, not your DCS credentials.'}</p>
           <label className="bf-label">Username<input className="bf-field" value={username} onChange={e=>setUsername(e.target.value)} required minLength={modal.type==='signup'?3:undefined} maxLength={modal.type==='signup'?24:32} autoFocus autoComplete="username" autoCapitalize="none" spellCheck={false}/></label>
           <label className="bf-label">Password<input className="bf-field" type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={modal.type==='signup'?12:undefined} maxLength={modal.type==='signup'?128:256} autoComplete={modal.type==='signup'?'new-password':'current-password'}/></label>
+          {modal.type==='login'&&oauth?.enabled&&<a className="bf-btn bf-outline text-center" href={oauth.login_url}>Continue with Google (OAuth 2.0)</a>}
         </>}
         {modal.type==='link'&&<>
           <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
@@ -310,6 +335,7 @@ function Modal({modal,close,player,catalog,campaign,busy,savePilot,login,signup,
 function App() {
   const [section,setSection]=useState('tacview');
   const [state,setState]=useState(null),[campaign,setCampaign]=useState(null),[live,setLive]=useState({snapshot:null,current:false,changes:{}});
+  const [weather,setWeather]=useState(null),[oauth,setOauth]=useState({enabled:false});
   const [demoPilotId,setDemoPilotId]=useState(''),[demoPilot,setDemoPilot]=useState(null);
   const [connection,setConnection]=useState('Connecting'),[busy,setBusy]=useState(false),[modal,setModal]=useState(null),[notice,setNotice]=useState(null);
   const workspace=state?.workspace;
@@ -363,6 +389,8 @@ function App() {
     feedEvents.addEventListener('campaign',change);
     void (async()=>{
       const stored=await refresh();
+      request('/api/weather').then(setWeather).catch(()=>{});
+      request('/api/auth/oauth/status').then(setOauth).catch(()=>{});
       if (!stored||stored.workspace?.mode==='production'||!localHost) return;
       const name=params.get('callsign')||localStorage.getItem('bf_callsign')||(params.get('demo')==='1'?'Professor_Smith':'');
       if(name){try{await identifyLocal(name,+localStorage.getItem('bf_side')||2);await refresh();}catch(e){alert(e.message,true);}}
@@ -457,8 +485,13 @@ function App() {
   const common={campaign,player,pilotId,action,open:setModal,production,
     canCommand:production?Boolean(workspace.can_command):localDemo,
     disabled:busy||!pilotId||connection!=='Connected'||(production&&!workspace.csrf)};
+  const selectSection=next=>{
+    setSection(next);
+    fetch('/api/app-telemetry',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({event:'tab_view',detail:next})}).catch(()=>{});
+  };
   return <div className="min-h-screen lg:grid lg:grid-cols-[220px_minmax(0,1fr)]">
-    <Sidebar section={section} setSection={setSection} counts={counts} connection={connection}/>
+    <Sidebar section={section} setSection={selectSection} counts={counts} connection={connection}/>
     <div className="min-w-0">
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-panel px-4 py-3 sm:px-7">
         <div><span className="eyebrow">{production?'Campaign workspace':localDemo?'Local demo workspace':'Campaign spectator'}</span><div id="workspaceName" className="font-semibold">{title}</div></div>
@@ -471,7 +504,7 @@ function App() {
           {localDemo&&pilotId&&params.get('demo')==='1'&&<Btn disabled={common.disabled} onClick={()=>action('/api/demo/grant_merits',{amount:25},'25 demo merits awarded.')}>+25 demo CM</Btn>}
         </div>
       </header>
-      <Theater observation={live}/>
+      <Theater observation={live} weather={weather}/>
       <main className="min-w-0 px-3 py-4 sm:px-6 sm:py-6">
         <Airspace visible={section==='tacview'}/>
         {production&&!pilotId&&['armory','requisition','marketplace'].includes(section)&&<div className="mb-4 border border-line bg-panel p-4 text-sm"><Btn onClick={()=>setModal({type:workspace.link_required?'link':'login'})}>{workspace.link_required?'Link your DCS account':'Sign in'}</Btn> to use your personal inventory and coalition exchange.</div>}
@@ -481,10 +514,11 @@ function App() {
         {section==='techTree'&&<Research observation={live}/>}
         {section==='marketplace'&&<Exchange {...common} orders={orders} history={state?.trade_history||[]} catalog={catalog} players={state?.players||{}}/>}
         {section==='leaderboard'&&<Standings players={state?.players||{}}/>}
+        {section==='telemetry'&&<TelemetryPanel/>}
       </main>
       <footer className="border-t border-line px-4 py-3 font-mono text-[10px] text-muted sm:px-7">Companion Merits are separate from the DCS coalition treasury.</footer>
     </div>
-    {modal&&<Modal key={modal.type+'-'+(modal.item||'')} modal={modal} close={()=>setModal(null)} {...common} catalog={catalog} savePilot={savePilot} login={login} signup={signup} startLink={startLink} finishLink={finishLink} busy={busy}/>}
+    {modal&&<Modal key={modal.type+'-'+(modal.item||'')} modal={modal} close={()=>setModal(null)} {...common} oauth={oauth} catalog={catalog} savePilot={savePilot} login={login} signup={signup} startLink={startLink} finishLink={finishLink} busy={busy}/>}
     {notice&&<div className={'fixed right-4 bottom-4 z-50 max-w-[min(420px,90vw)] border bg-paper p-3 text-sm shadow-lg '+(notice.error?'border-red-500':'border-emerald-700')} role={notice.error?'alert':'status'}>{notice.text}<button className="ml-4 cursor-pointer text-muted" type="button" aria-label="Dismiss notification" onClick={()=>setNotice(null)}>×</button></div>}
   </div>;
 }

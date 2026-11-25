@@ -16,7 +16,13 @@ from threading import Lock, RLock
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 import math
+import html
+import traceback
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie, CookieError
+from urllib.parse import urlsplit, parse_qs, urlencode
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "server", "persistence")))
@@ -51,14 +57,24 @@ if model_manifest.is_file():
             STATIC.add(path)
     if (model_manifest.parent / "su-35-license.txt").is_file():
         STATIC.add("/models/vendor/su-35-license.txt")
-READ_ROUTES = {"/api/state", "/api/campaign", "/api/upgrades", "/api/telemetry"}
+READ_ROUTES = {"/api/state", "/api/campaign", "/api/upgrades", "/api/telemetry",
+               "/api/weather", "/api/app-telemetry", "/api/auth/oauth/status", "/mcp", "/mcp/app"}
 DEMO_ACTIONS = {"/api/player/set_callsign", "/api/demo/grant_merits", "/api/requisition",
                 "/api/marketplace/list", "/api/marketplace/buy", "/api/armory/mount",
                 "/api/operations/join", "/api/operations/leave", "/api/operations/propose",
-                "/api/operations/command", "/api/operations/launch", "/api/upgrades/purchase"}
+                "/api/operations/command", "/api/operations/launch", "/api/upgrades/purchase",
+                "/api/app-telemetry"}
 WORKSPACE_ACTIONS = (DEMO_ACTIONS - {"/api/demo/grant_merits", "/api/upgrades/purchase"}) | {
     "/api/marketplace/cancel", "/api/workspace/login", "/api/workspace/logout", "/api/dcs/deliver",
     "/api/workspace/signup", "/api/dcs/link/start", "/api/dcs/link/finish"}
+OAUTH_CLIENT_ID = os.environ.get("BF_OAUTH_CLIENT_ID", "").strip()
+OAUTH_CLIENT_SECRET = os.environ.get("BF_OAUTH_CLIENT_SECRET", "").strip()
+OAUTH_REDIRECT_URI = os.environ.get("BF_OAUTH_REDIRECT_URI", "").strip()
+OAUTH_STATES = {}
+APP_LOG_LOCK = Lock()
+APP_LOGS = deque(maxlen=200)
+WEATHER_LOCK = Lock()
+WEATHER_CACHE = {"ts": 0.0, "data": None}
 CALLSIGN = re.compile(r"[A-Za-z0-9 _-]{1,24}")
 SESSIONS = {}
 STATE_LOCK = RLock()
@@ -118,6 +134,85 @@ def anonymize_live_tracks(data):
             for row in data[category]
         ]
 
+
+def record_app_event(kind, path, status=200, detail="", ms=0.0):
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "kind": str(kind)[:24],
+        "path": str(path)[:120],
+        "status": int(status),
+        "ms": round(float(ms), 1),
+        "detail": str(detail)[:400],
+    }
+    with APP_LOG_LOCK:
+        APP_LOGS.append(entry)
+
+
+def fetch_caucasus_weather():
+    now = time.monotonic()
+    with WEATHER_LOCK:
+        if WEATHER_CACHE["data"] and now - WEATHER_CACHE["ts"] < 300:
+            return WEATHER_CACHE["data"]
+    url = ("https://api.open-meteo.com/v1/forecast?latitude=43.45&longitude=39.95"
+           "&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code")
+    payload = {"source": "Open-Meteo", "location": "Sochi / Caucasus", "live": False,
+               "temperature_c": None, "wind_kt": None, "wind_deg": None, "summary": "Unavailable"}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Battlefront/1.0"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            raw = json.loads(resp.read(16384).decode("utf-8"))
+        cur = raw.get("current") or {}
+        wind_kmh = cur.get("wind_speed_10m")
+        payload = {
+            "source": "Open-Meteo",
+            "location": "Sochi / Caucasus",
+            "live": True,
+            "temperature_c": cur.get("temperature_2m"),
+            "wind_kt": round(wind_kmh * 0.539957, 1) if isinstance(wind_kmh, (int, float)) else None,
+            "wind_deg": cur.get("wind_direction_10m"),
+            "weather_code": cur.get("weather_code"),
+            "updated": cur.get("time"),
+        }
+    except (OSError, ValueError, urllib.error.URLError):
+        pass
+    with WEATHER_LOCK:
+        WEATHER_CACHE["ts"] = now
+        WEATHER_CACHE["data"] = payload
+    return payload
+
+
+MCP_TOOLS = [
+    {
+        "name": "get_theater_status",
+        "description": "Get live or recorded Caucasus theater sector counts, coalition status, and active aircraft count.",
+        "inputSchema": {"type": "object", "properties": {"replay": {"type": "boolean"}}},
+        "_meta": {"ui": {"resourceUri": "ui://battlefront/theater"}},
+    },
+    {
+        "name": "get_sector_threat_picture",
+        "description": "Inspect a Caucasus sector's coalition control and nearby aircraft contacts.",
+        "inputSchema": {"type": "object", "properties": {"sector": {"type": "string"}}},
+    },
+    {
+        "name": "list_ordnance_orders",
+        "description": "List munition catalog items and active player exchange orders.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "propose_flight_plan",
+        "description": "Propose a companion flight plan for a target sector (persists in SQLite when authenticated).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_sector": {"type": "string"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+            },
+            "required": ["target_sector"],
+        },
+    },
+]
+
 class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=WEB_DIR, **kwargs)
@@ -127,7 +222,10 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        if urlsplit(getattr(self, "path", "")).path == "/mcp/app":
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+        else:
+            self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         if self.session_cookie:
             secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
@@ -192,6 +290,7 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
         self._static(head=True)
 
     def do_GET(self):
+        started = time.monotonic()
         if WORKSPACE and urlsplit(self.path).path == "/healthz":
             self._workspace_health()
             return
@@ -199,15 +298,52 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
             return
         request = urlsplit(self.path)
         self.path = request.path
-        self.view_query = request.query if self.path in ("/api/telemetry","/api/campaign") else ""
-        if self.path in STATIC and self.path not in ("/", "/index.html"):
-            self._static()
-            return
-        if WORKSPACE and self.path in ("/api/state", "/api/campaign", "/api/upgrades"):
-            self._workspace_read()
-            return
-        with STATE_LOCK:
-            self._get_state()
+        self.view_query = request.query if self.path in ("/api/telemetry", "/api/campaign", "/api/auth/oauth/callback") else ""
+        try:
+            if self.path == "/api/weather":
+                self._send_json(fetch_caucasus_weather())
+                return
+            if self.path == "/api/app-telemetry":
+                with APP_LOG_LOCK:
+                    events = list(APP_LOGS)[-100:]
+                errors = sum(1 for e in events if e["status"] >= 400)
+                avg_ms = round(sum(e["ms"] for e in events) / len(events), 1) if events else 0.0
+                self._send_json({"events": list(reversed(events)), "summary": {"total": len(events), "errors": errors, "avg_ms": avg_ms}})
+                return
+            if self.path == "/api/auth/oauth/status":
+                enabled = bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET)
+                self._send_json({"enabled": enabled, "provider": "google", "login_url": "/api/auth/oauth/login"})
+                return
+            if self.path == "/api/auth/oauth/login":
+                self._oauth_login()
+                return
+            if self.path == "/api/auth/oauth/callback":
+                self._oauth_callback()
+                return
+            if self.path == "/mcp":
+                self._send_json({
+                    "name": "battlefront-mcp",
+                    "version": "1.0.0",
+                    "protocolVersion": "2025-03-26",
+                    "transport": "streamable-http",
+                    "tools": MCP_TOOLS,
+                    "app_url": "/mcp/app",
+                })
+                return
+            if self.path == "/mcp/app":
+                self._send_html(self._mcp_app_html())
+                return
+            if self.path in STATIC and self.path not in ("/", "/index.html"):
+                self._static()
+                return
+            if WORKSPACE and self.path in ("/api/state", "/api/campaign", "/api/upgrades"):
+                self._workspace_read()
+                return
+            with STATE_LOCK:
+                self._get_state()
+        except Exception:
+            record_app_event("error", self.path, 500, traceback.format_exc()[-380:], (time.monotonic() - started) * 1000)
+            self._send_json({"success": False, "error": "Internal server error."}, 500)
 
     def _get_state(self):
         try:
@@ -257,13 +393,25 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
             self._static()
 
     def do_POST(self):
+        started = time.monotonic()
         if not self._authorized():
             return
-        if WORKSPACE:
-            self._workspace_write()
-            return
-        with STATE_LOCK:
-            self._post_state()
+        self.path = urlsplit(self.path).path
+        try:
+            if self.path == "/mcp":
+                self._handle_mcp_post()
+                return
+            if self.path == "/api/app-telemetry":
+                self._handle_app_telemetry_post()
+                return
+            if WORKSPACE:
+                self._workspace_write()
+                return
+            with STATE_LOCK:
+                self._post_state()
+        except Exception:
+            record_app_event("error", self.path, 500, traceback.format_exc()[-380:], (time.monotonic() - started) * 1000)
+            self._send_json({"success": False, "error": "Internal server error."}, 500)
 
     def _workspace_token(self):
         jar = SimpleCookie()
@@ -545,7 +693,247 @@ class BattlefrontHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
+    def _send_html(self, body_text, status=200):
+        raw = body_text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _oauth_login(self):
+        if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET):
+            self._send_json({
+                "success": False,
+                "error": "OAuth 2.0 is not configured on this host. Set BF_OAUTH_CLIENT_ID and BF_OAUTH_CLIENT_SECRET.",
+            }, 501)
+            return
+        state = secrets.token_urlsafe(24)
+        OAUTH_STATES[state] = time.monotonic()
+        for k, ts in list(OAUTH_STATES.items()):
+            if time.monotonic() - ts > 600:
+                OAUTH_STATES.pop(k, None)
+        redirect = OAUTH_REDIRECT_URI or ((WORKSPACE_ORIGIN or f"http://127.0.0.1:{PORT}") + "/api/auth/oauth/callback")
+        query = urlencode({
+            "client_id": OAUTH_CLIENT_ID,
+            "redirect_uri": redirect,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "prompt": "select_account",
+        })
+        self.send_response(302)
+        self.send_header("Location", f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
+        self.end_headers()
+
+    def _oauth_callback(self):
+        qs = parse_qs(self.view_query, max_num_fields=12)
+        state = (qs.get("state") or [""])[0]
+        code = (qs.get("code") or [""])[0]
+        if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET) or not state or state not in OAUTH_STATES:
+            self._send_json({"success": False, "error": "Invalid or expired OAuth state."}, 400)
+            return
+        OAUTH_STATES.pop(state, None)
+        redirect = OAUTH_REDIRECT_URI or ((WORKSPACE_ORIGIN or f"http://127.0.0.1:{PORT}") + "/api/auth/oauth/callback")
+        token_req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=urlencode({
+                "code": code,
+                "client_id": OAUTH_CLIENT_ID,
+                "client_secret": OAUTH_CLIENT_SECRET,
+                "redirect_uri": redirect,
+                "grant_type": "authorization_code",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(token_req, timeout=5) as resp:
+            tokens = json.loads(resp.read(16384).decode("utf-8"))
+        user_req = urllib.request.Request(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": f"Bearer {tokens.get('access_token', '')}"},
+        )
+        with urllib.request.urlopen(user_req, timeout=5) as resp:
+            profile = json.loads(resp.read(16384).decode("utf-8"))
+        record_app_event("oauth", "/api/auth/oauth/callback", 302, profile.get("email", "verified"))
+        self.send_response(302)
+        self.send_header("Location", "/?oauth=ok")
+        self.end_headers()
+
+    def _handle_app_telemetry_post(self):
+        if WORKSPACE and not self._workspace_origin_ok():
+            self._send_json({"success": False, "error": "Same-origin required."}, 403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json({"success": False, "error": "Invalid length."}, 400)
+            return
+        if not 0 < length <= 1024:
+            self._send_json({"success": False, "error": "Invalid telemetry payload."}, 413)
+            return
+        body = json.loads(self.rfile.read(length))
+        if not isinstance(body, dict):
+            self._send_json({"success": False, "error": "Invalid JSON object."}, 400)
+            return
+        record_app_event("ui", body.get("event", "interaction"), 200, body.get("detail", ""))
+        self._send_json({"success": True})
+
+    def _mcp_app_html(self):
+        with STATE_LOCK:
+            tactical = telemetry_engine.get_tactical_state(None, replay_only=False)
+        if not tactical.get("units"):
+            with STATE_LOCK:
+                tactical = telemetry_engine.get_tactical_state(None, replay_only=True)
+        if WORKSPACE:
+            session = workspace.session(self._workspace_token())
+            st = workspace.get_state(session)
+            sectors, _ = self._workspace_sectors(False)
+            orders = st.get("marketplace", [])
+        else:
+            sectors = []
+            orders = []
+        rows = "".join(
+            f"<tr><td>{html.escape(str(u.get('callsign','')))}</td>"
+            f"<td>{'BLUFOR' if u.get('side')==2 else 'REDFOR'}</td>"
+            f"<td>{html.escape(str(u.get('type','')))}</td>"
+            f"<td>{int(u.get('alt',0))} m</td></tr>"
+            for u in tactical.get("units", [])[:12]
+        ) or "<tr><td colspan='4'>No active aircraft tracks</td></tr>"
+        sec_rows = "".join(
+            f"<tr><td>{html.escape(str(s.get('name','')))}</td>"
+            f"<td>{'BLUFOR' if s.get('side')==2 else 'REDFOR'}</td></tr>"
+            for s in sectors[:10]
+        ) or "<tr><td colspan='2'>Caucasus sectors loaded in workspace</td></tr>"
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'><title>Battlefront MCP App</title>"
+            "<style>body{font-family:system-ui,sans-serif;margin:16px;background:#f7f6f1;color:#1b1d19}"
+            "h2{margin:0 0 8px;font-size:15px}table{width:100%;border-collapse:collapse;margin-bottom:16px;background:#fff}"
+            "th,td{border:1px solid #d4d3c8;padding:6px 8px;text-align:left;font-size:12px}th{background:#ecebe2}</style></head>"
+            f"<body><h2>Battlefront MCP Theater Snapshot ({'LIVE' if tactical.get('is_live_dcs') else 'REPLAY'})</h2>"
+            f"<table><thead><tr><th>Callsign</th><th>Coalition</th><th>Airframe</th><th>Altitude</th></tr></thead><tbody>{rows}</tbody></table>"
+            f"<h2>Sectors &amp; Open Exchange Orders ({len(orders)})</h2>"
+            f"<table><thead><tr><th>Sector</th><th>Control</th></tr></thead><tbody>{sec_rows}</tbody></table></body></html>"
+        )
+
+    def _handle_mcp_post(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Content-Length"}}, 400)
+            return
+        if not 0 < length <= 16384:
+            self._send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Body size out of range"}}, 413)
+            return
+        req = json.loads(self.rfile.read(length))
+        rpc_id = req.get("id")
+        method = req.get("method", "")
+        params = req.get("params") or {}
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}, "resources": {}},
+                "serverInfo": {"name": "battlefront-mcp", "version": "1.0.0"},
+            }
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+            return
+        if method in ("notifications/initialized", "ping"):
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {}})
+            return
+        if method == "tools/list":
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": MCP_TOOLS}})
+            return
+        if method == "resources/list":
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"resources": [
+                {"uri": "ui://battlefront/theater", "name": "Battlefront Theater Board", "mimeType": "text/html;profile=mcp-app"}
+            ]}})
+            return
+        if method == "resources/read":
+            uri = params.get("uri")
+            if uri != "ui://battlefront/theater":
+                self._send_json({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "Unknown resource URI"}}, 404)
+                return
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {
+                "contents": [{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": self._mcp_app_html()}]
+            }})
+            return
+        if method == "tools/call":
+            name = params.get("name", "")
+            args = params.get("arguments") or {}
+            record_app_event("mcp", f"/mcp:{name}", 200, json.dumps({k: v for k, v in args.items() if k != "password"}))
+            if name == "get_theater_status":
+                use_replay = bool(args.get("replay", False))
+                with STATE_LOCK:
+                    tactical = telemetry_engine.get_tactical_state(None, replay_only=use_replay)
+                sectors, _ = self._workspace_sectors(use_replay) if WORKSPACE else ([], None)
+                blue = sum(1 for s in sectors if s.get("side") == 2)
+                red = sum(1 for s in sectors if s.get("side") == 1)
+                summary = {
+                    "live_dcs": bool(tactical.get("is_live_dcs")),
+                    "blue_sectors": blue,
+                    "red_sectors": red,
+                    "active_aircraft": len(tactical.get("units", [])),
+                    "active_missiles": len(tactical.get("missiles", [])),
+                    "app_iframe_url": "/mcp/app",
+                }
+                self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {
+                    "content": [{"type": "text", "text": json.dumps(summary)}],
+                    "_meta": {"ui": {"resourceUri": "ui://battlefront/theater"}},
+                }})
+                return
+            if name == "get_sector_threat_picture":
+                sector_q = str(args.get("sector", "")).strip().lower()
+                with STATE_LOCK:
+                    tactical = telemetry_engine.get_tactical_state(None, replay_only=False)
+                if not tactical.get("units"):
+                    with STATE_LOCK:
+                        tactical = telemetry_engine.get_tactical_state(None, replay_only=True)
+                sectors, _ = self._workspace_sectors(False) if WORKSPACE else ([], None)
+                matched = [s for s in sectors if not sector_q or sector_q in str(s.get("name", "")).lower()]
+                payload = {
+                    "sectors": matched[:10],
+                    "contacts": [{"callsign": u.get("callsign"), "side": u.get("side"), "type": u.get("type"), "alt": u.get("alt")}
+                                 for u in tactical.get("units", [])[:15]],
+                }
+                self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}})
+                return
+            if name == "list_ordnance_orders":
+                if WORKSPACE:
+                    st = workspace.get_state(workspace.session(self._workspace_token()))
+                else:
+                    inv, _, _ = self._managers()
+                    st = inv.load_data()
+                payload = {"orders": st.get("marketplace", []), "catalog_keys": list((st.get("munition_catalog") or {}).keys())}
+                self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}})
+                return
+            if name == "propose_flight_plan":
+                target = str(args.get("target_sector", "")).strip()
+                if not target:
+                    self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"isError": True, "content": [{"type": "text", "text": "target_sector is required"}]}})
+                    return
+                if WORKSPACE:
+                    token = self._workspace_token()
+                    if not token and args.get("username") and args.get("password"):
+                        token = workspace.login(args.get("username"), args.get("password"))
+                    session = workspace.session(token) if token else None
+                    if not session:
+                        self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"isError": True, "content": [{"type": "text", "text": "Provide valid workspace username and password to persist flight plan."}]}})
+                        return
+                    sectors, _ = self._workspace_sectors()
+                    res = workspace.mutate("/api/operations/propose", session, {"side": session["side"], "target_sector": target}, sectors)
+                    self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}})
+                    return
+                inv, camp, _ = self._managers()
+                res = camp.propose_operation(2, target)
+                self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}})
+                return
+            self._send_json({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": "Unknown tool"}}, 404)
+            return
+        self._send_json({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": "Unknown MCP method"}}, 404)
+
     def _send_json(self, data, status=200):
+        if getattr(self, "path", "") not in ("/api/telemetry", "/api/app-telemetry") or status >= 400:
+            record_app_event("api", getattr(self, "path", ""), status, data.get("error", "") if isinstance(data, dict) else "")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
