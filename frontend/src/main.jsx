@@ -16,11 +16,12 @@ const noPilot = {callsign:'Guest',side:2,points:0,inventory:{}};
 const feedEvents = new EventTarget();
 window.setBattlefrontCampaignSnapshot = snapshot => feedEvents.dispatchEvent(new CustomEvent('campaign',{detail:snapshot}));
 
-async function request(path, data, csrf) {
+async function request(path, data, csrf, signal) {
   const options = data === undefined ? {cache:'no-store'} : {
     method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-BF-CSRF':csrf}:{})},body:JSON.stringify(data),
   };
   options.credentials = 'same-origin';
+  if (signal) options.signal = signal;
   const res = await fetch(path, options);
   const json = await res.json().catch(()=>null);
   if (!res.ok || !json || json.success === false) throw Object.assign(Error(json?.error || `Request failed (${res.status})`),{status:res.status});
@@ -136,10 +137,31 @@ function Operations({campaign,player,pilotId,action,open,disabled,production,can
   </section>;
 }
 
-function Armory({player,catalog,action,open,disabled}) {
+function DcsDeliveryStatus({delivery}) {
+  const airfield = delivery.airfield || 'Mineralnye Vody';
+  const item = delivery.item;
+  const viperMod = item === 'AIM-120D';
+  const details = {
+    idle: ['Demo airfield delivery', `Send one ${item} from your armory to ${airfield}. This uses one item you already own; there is no second merit charge.`],
+    pending: ['Awaiting DCS confirmation', `One ${item} is held from your inventory until DCS confirms delivery. It is not ready to rearm yet.`],
+    ready: ['Ready to rearm at the demo airfield', `DCS confirmed one ${viperMod ? 'modded ' : ''}${item} in base stock at ${airfield}. When parked there, use Rearm & Refuel in DCS. Your aircraft loadout was not changed automatically.`],
+    rejected: ['DCS delivery rejected', 'DCS did not accept the delivery. Check your armory; this demo order will not retry automatically.'],
+    review: ['Delivery held for review', `The ${item} is still reserved and delivery has not been confirmed. Do not resend or try to rearm from this order.`],
+  };
+  const detail = Object.hasOwn(details, delivery.status) ? details[delivery.status] : null;
+  if (!detail) return null;
+  return <aside role="status" aria-atomic="true" className="mb-4 border border-line bg-panel px-4 py-3" id="dcs-delivery-status">
+    <p className="eyebrow">DCS delivery · separate from your loadout plan</p><strong className="mt-1 block">{detail[0]}</strong><p className="mt-1 text-sm text-muted">{detail[1]}</p>
+    {viperMod&&['idle','pending','ready'].includes(delivery.status)&&<p className="mt-3 border-l-4 border-signal bg-field px-3 py-2 text-sm"><strong>DCS may show AIM-120B.</strong> The private Viper recording mod puts the AIM-120D in the stock AIM-120B slot. This is not native AIM-120D support.</p>}
+  </aside>;
+}
+
+function Armory({player,catalog,action,open,disabled,delivery}) {
   const items=Object.entries(player.inventory||{}).filter(([,n])=>n>0);
-  return <section id="armoryTab"><Heading title="Personal armory" note="Manage persistent companion inventory, choose a planned loadout, or list items for trade. Nothing here changes a DCS aircraft."><Btn id="openSellModalBtn" kind="primary" onClick={()=>open({type:'sell'})} disabled={disabled||!items.length}>Create sell order</Btn></Heading>
-    {items.length?<div className="card-grid">{items.map(([key,n])=><Card key={key}><p className="eyebrow">{key} · {n} in stock</p><h2 className="my-1 text-xl font-semibold">{catalog[key]?.name||key}</h2><p className="mb-4 text-sm text-muted">{catalog[key]?.type||'Inventory item'}</p><div className="flex flex-wrap gap-2"><Btn disabled={disabled||Boolean(player.planned_loadout?.[key])} onClick={()=>action('/api/armory/mount',{munition:key},'Added to planned loadout.')}>{player.planned_loadout?.[key]?'In planned loadout':'Add to loadout plan'}</Btn><Btn disabled={disabled} onClick={()=>open({type:'sell',item:key})}>List for sale</Btn></div></Card>)}</div>:<Empty>No items in your armory. Visit the munitions depot to add inventory.</Empty>}
+  const sendable = delivery?.status==='idle' ? delivery.item : null;
+  return <section id="armoryTab"><Heading title="Personal armory" note={delivery?"Manage your companion inventory. Loadout plans do not change DCS aircraft; the separate delivery action can add one item to the demo airfield's stock.":"Manage persistent companion inventory, choose a planned loadout, or list items for trade. Nothing here changes a DCS aircraft."}><Btn id="openSellModalBtn" kind="primary" onClick={()=>open({type:'sell'})} disabled={disabled||!items.length}>Create sell order</Btn></Heading>
+    {delivery&&<DcsDeliveryStatus delivery={delivery}/>}
+    {items.length?<div className="card-grid">{items.map(([key,n])=><Card key={key}><p className="eyebrow">{key} · {n} in stock</p><h2 className="my-1 text-xl font-semibold">{catalog[key]?.name||key}</h2><p className="mb-4 text-sm text-muted">{catalog[key]?.type||'Inventory item'}</p><div className="flex flex-wrap gap-2"><Btn disabled={disabled||Boolean(player.planned_loadout?.[key])} onClick={()=>action('/api/armory/mount',{munition:key},'Added to planned loadout.')}>{player.planned_loadout?.[key]?'In planned loadout':'Add to loadout plan'}</Btn><Btn disabled={disabled} onClick={()=>open({type:'sell',item:key})}>List for sale</Btn>{key===sendable&&<Btn kind="primary" disabled={disabled} onClick={()=>action('/api/dcs/deliver',{munition:key},'Delivery requested. Awaiting DCS confirmation.')}>Send to DCS</Btn>}</div></Card>)}</div>:<Empty>No items in your armory. Visit the munitions depot to add inventory.</Empty>}
   </section>;
 }
 
@@ -147,7 +169,10 @@ function Depot({catalog,player,action,disabled,production}) {
   const [filter,setFilter]=useState('all');
   const entries=Object.entries(catalog).filter(([,v])=>filter==='all'||v.coalition===filter);
   return <section id="requisitionTab"><Heading title="Munitions depot" note="Spend Companion Merits (CM) to add items to your personal armory. This does not spend DCS coalition funds."><Filter values={[["all","All fleets"],["BLUFOR","BLUFOR"],["REDFOR","REDFOR"]]} selected={filter} onSelect={setFilter}/></Heading>
-    {entries.length?<div className="card-grid">{entries.map(([key,v])=><Card key={key} className="flex flex-col items-start gap-2"><p className="eyebrow">{v.coalition} · {v.type}</p><h2 className="text-lg font-semibold">{v.name}</h2><p className="text-sm text-muted">{v.desc}</p><p className="text-xs text-muted">{v.range_km} km · Mach {v.mach} · {v.compatible?.join(', ')}</p><Btn className="mt-auto" kind="primary" disabled={disabled||player.points<v.cost_points||production&&v.coalition!==sideName(player.side)} onClick={()=>action('/api/requisition',{munition:key},`${key} requisitioned.`)}>Requisition · {v.cost_points} CM</Btn></Card>)}</div>:<Empty>No matching items.</Empty>}
+    {entries.length?<div className="card-grid">{entries.map(([key,v])=>{
+      const specs=[Number.isFinite(v.range_km)&&`${v.range_km} km`,Number.isFinite(v.mach)&&`Mach ${v.mach}`,v.compatible?.join(', ')].filter(Boolean).join(' · ');
+      return <Card key={key} className="flex flex-col items-start gap-2"><p className="eyebrow">{v.coalition} · {v.type}</p><h2 className="text-lg font-semibold">{v.name}</h2><p className="text-sm text-muted">{v.desc}</p>{specs&&<p className="text-xs text-muted">{specs}</p>}<Btn className="mt-auto" kind="primary" disabled={disabled||player.points<v.cost_points||production&&v.coalition!==sideName(player.side)} onClick={()=>action('/api/requisition',{munition:key},`${key} requisitioned.`)}>Requisition · {v.cost_points} CM</Btn></Card>;
+    })}</div>:<Empty>No matching items.</Empty>}
   </section>;
 }
 
@@ -237,6 +262,9 @@ function App() {
   const production=workspace?.mode==='production';
   const localDemo=Boolean(state)&&!production&&localHost;
   const pilotId=production?(workspace.authenticated?workspace.player_id||'':''):localDemo?demoPilotId:'';
+  const delivery=production&&workspace.authenticated&&pilotId&&typeof state?.delivery?.item==='string'?state.delivery:null;
+  const deliveryStatus=delivery?.status, deliveryOrderId=delivery?.order_id;
+  const watchReadyProfile=section==='armory'&&delivery?.item==='AIM-120D'&&deliveryStatus==='idle';
   const player=state?.players?.[pilotId]||(localDemo&&demoPilot)||noPilot;
   const catalog=state?.munition_catalog||{};
   const orders=state?.marketplace||[];
@@ -286,6 +314,25 @@ function App() {
     })();
     return ()=>feedEvents.removeEventListener('campaign',change);
   },[]);
+  useEffect(()=>{
+    if((deliveryStatus!=='pending'&&!watchReadyProfile)||!pilotId||busy) return;
+    let timer;
+    const controller=new AbortController();
+    const poll=async()=>{
+      try {
+        const next=await request('/api/state',undefined,undefined,controller.signal);
+        if(controller.signal.aborted) return;
+        if(!next.workspace?.authenticated||next.workspace.player_id===pilotId) {
+          setState(current=>current?.workspace?.player_id===pilotId&&current.delivery?.status===deliveryStatus&&
+            current.delivery.order_id===deliveryOrderId?next:current);
+          if(next.delivery?.status!==deliveryStatus) return;
+        }
+      } catch { /* A network delay is not a delivery decision; retry without clearing the status. */ }
+      if(!controller.signal.aborted) timer=setTimeout(poll,3000);
+    };
+    timer=setTimeout(poll,3000);
+    return ()=>{clearTimeout(timer);controller.abort();};
+  },[busy,pilotId,deliveryStatus,deliveryOrderId,watchReadyProfile]);
   useEffect(()=>{if(!notice)return;const t=setTimeout(()=>setNotice(null),6500);return()=>clearTimeout(t);},[notice]);
   async function login(username,password){
     setBusy(true);
@@ -302,7 +349,7 @@ function App() {
     setBusy(true);
     try {
       await request('/api/workspace/logout',{},workspace.csrf);
-      setState({...state,workspace:{mode:'production',authenticated:false},players:{},marketplace:[],trade_history:[]});
+      setState({...state,workspace:{mode:'production',authenticated:false},players:{},marketplace:[],trade_history:[],delivery:undefined});
       setCampaign(null);
       await refresh();
       alert('Signed out.');
@@ -324,7 +371,7 @@ function App() {
       const body=production?fields:{player_id:pilotId,seller_id:pilotId,buyer_id:pilotId,...fields};
       const data=await request(path,body,production?workspace.csrf:null);
       await refresh(); alert(data.message||message||'Done.');return true;
-    } catch(e){if(e.status===401||e.status===403) await refresh();alert(e.message,true);return false;}finally{setBusy(false);}
+    } catch(e){if(e.status===401||e.status===403||(path==='/api/dcs/deliver'&&e.status===409)) await refresh();alert(e.message,true);return false;}finally{setBusy(false);}
   }
   const common={campaign,player,pilotId,action,open:setModal,production,
     canCommand:production?Boolean(workspace.can_command):localDemo,
@@ -347,7 +394,7 @@ function App() {
         <Airspace visible={section==='tacview'}/>
         {production&&!pilotId&&['armory','requisition','marketplace'].includes(section)&&<div className="mb-4 border border-line bg-panel p-4 text-sm"><Btn onClick={()=>setModal({type:'login'})}>Sign in</Btn> to use your personal inventory and coalition exchange.</div>}
         {section==='operations'&&<Operations {...common}/>}
-        {section==='armory'&&<Armory {...common} catalog={catalog}/>}
+        {section==='armory'&&<Armory {...common} catalog={catalog} delivery={delivery}/>}
         {section==='requisition'&&<Depot {...common} catalog={catalog}/>}
         {section==='techTree'&&<Research observation={live}/>}
         {section==='marketplace'&&<Exchange {...common} orders={orders} history={state?.trade_history||[]} catalog={catalog} players={state?.players||{}}/>}

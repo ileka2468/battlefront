@@ -34,6 +34,7 @@ AIRCRAFT_FRESH_SECONDS = 4
 AIRCRAFT_HOLD_SECONDS = 15
 CAMPAIGN_FRESH_SECONDS = 5
 CAMPAIGN_MAX_SKEW_SECONDS = 5
+LIVE_MISSIONS = ('Battlefront Caucasus', 'Battlefront Delivery Demo')
 
 class TelemetryEngine:
     def __init__(self):
@@ -292,7 +293,7 @@ class TelemetryEngine:
                 return None
             missiles[m['id']] = {k:m[k] for k in ('id','type','side','x','z','alt','heading','pitch','speed_kts')}
         return {**{k: frame[k] for k in ('version', 'theater', 'session', 'seq', 'sim_time')}, 'units': list(units.values()), 'missiles': list(missiles.values()),
-                'mission': 'Battlefront Caucasus' if frame.get('mission')=='Battlefront Caucasus' else None}
+                'mission': frame.get('mission') if frame.get('mission') in LIVE_MISSIONS else None}
 
     @staticmethod
     def validate_campaign(campaign):
@@ -369,7 +370,7 @@ class TelemetryEngine:
 
         if self.campaign_only:
             previous = self._last_campaign_flight
-            if latest and latest[1]['mission'] != 'Battlefront Caucasus':
+            if latest and latest[1]['mission'] not in LIVE_MISSIONS:
                 # An actual mission change is not an exporter hiccup. Never show
                 # the previous campaign or promote an ordinary mission as live.
                 self._last_campaign_flight = None
@@ -526,6 +527,8 @@ class TelemetryEngine:
                 data_source = 'DELAYED DCS · HOLDING LAST LIVE FRAME'
             elif frame.get('campaign'):
                 data_source = 'LIVE DCS · BATTLEFRONT CAMPAIGN'
+            elif frame.get('mission') == 'Battlefront Delivery Demo':
+                data_source = 'LIVE DCS · DELIVERY DEMO'
             elif self.campaign_only:
                 data_source = 'LIVE DCS · AIRSPACE ONLY · CAMPAIGN DATA UNAVAILABLE'
             else:

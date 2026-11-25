@@ -57,7 +57,7 @@ DEMO_ACTIONS = {"/api/player/set_callsign", "/api/demo/grant_merits", "/api/requ
                 "/api/operations/join", "/api/operations/leave", "/api/operations/propose",
                 "/api/operations/command", "/api/operations/launch", "/api/upgrades/purchase"}
 WORKSPACE_ACTIONS = (DEMO_ACTIONS - {"/api/demo/grant_merits", "/api/upgrades/purchase"}) | {
-    "/api/marketplace/cancel", "/api/workspace/login", "/api/workspace/logout"}
+    "/api/marketplace/cancel", "/api/workspace/login", "/api/workspace/logout", "/api/dcs/deliver"}
 CALLSIGN = re.compile(r"[A-Za-z0-9 _-]{1,24}")
 SESSIONS = {}
 STATE_LOCK = RLock()
@@ -69,7 +69,9 @@ if WORKSPACE:
     accounts = os.environ.get("BF_WORKSPACE_ACCOUNTS_FILE")
     default_catalog = Path(WEB_DIR).parent / "server/demo_catalog.json"
     catalog = json.loads(Path(os.environ.get("BF_WORKSPACE_CATALOG", default_catalog)).read_text(encoding="utf-8"))
-    workspace = WorkspaceStore(database, accounts, catalog)
+    workspace = WorkspaceStore(database, accounts, catalog,
+        delivery_dir=os.environ.get("BF_DCS_DELIVERY_DIR"),
+        delivery_account=os.environ.get("BF_DCS_DELIVERY_ACCOUNT"))
     planning_sectors = json.loads((Path(WEB_DIR) / "sectors.json").read_text(encoding="utf-8"))
 elif DEMO:
     demo_root = tempfile.TemporaryDirectory(prefix="battlefront-demo-")

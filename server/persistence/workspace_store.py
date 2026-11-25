@@ -1,4 +1,4 @@
-"""Durable web companion state; no simulator side effects or trust in display names."""
+"""Durable web companion state and a fixed, optional simulator delivery lane."""
 
 import hashlib
 import hmac
@@ -9,6 +9,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -20,6 +21,21 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 ACCOUNT_ID = re.compile(r"acct_[0-9a-f]{32}")
 PBKDF2_ITERATIONS = 600_000
 SESSION_SECONDS = 12 * 3600
+DELIVERY_ITEM = "AIM-120D"
+DELIVERY_SIDE = 2
+DELIVERY_VERSION = 3
+DELIVERY_AIRFIELD = "Mineralnye Vody"
+DELIVERY_REQUEST = "battlefront_delivery.request"
+DELIVERY_RECEIPT = "battlefront_delivery.receipt"
+DELIVERY_GUARD = "battlefront_delivery.applying"
+DELIVERY_CAPABILITY = "battlefront_delivery.capability"
+DELIVERY_CAPABILITY_CONTENT = b"BF3 VIPER_D_READY\n"
+DELIVERY_CAPABILITY_MAX_AGE = 10
+DELIVERY_PROFILE = "viper-d-recording"
+RECEIPT = re.compile(
+    rb"BF3 ([0-9a-f]{32}) (APPLYING|READY|REJECTED|REVIEW) "
+    rb"(-1|0|[1-9][0-9]{0,8}) (-1|0|[1-9][0-9]{0,8}) ([a-z][a-z0-9_]{0,39})\n",
+)
 
 
 class WorkspaceError(Exception):
@@ -74,12 +90,25 @@ def read_accounts(path):
 
 
 class WorkspaceStore:
-    def __init__(self, db_path, accounts_path, catalog):
+    def __init__(self, db_path, accounts_path, catalog, *, delivery_dir=None, delivery_account=None):
         self.path = Path(db_path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.accounts = read_accounts(accounts_path)
         self.by_id = {a["id"]: a for a in self.accounts.values()}
-        self.catalog = catalog
+        self.catalog = dict(catalog)
+        self.delivery_dir, self.delivery_actor = None, None
+        configured = self.accounts.get(delivery_account or "")
+        spec = self.catalog.get(DELIVERY_ITEM, {})
+        if (configured and configured["side"] == DELIVERY_SIDE and delivery_dir
+                and spec.get("coalition") == "BLUFOR" and "F-16C_50" in (spec.get("compatible") or [])
+                and spec.get("recording_profile") == DELIVERY_PROFILE):
+            try:
+                directory = Path(delivery_dir)
+                if directory.is_absolute() and directory.resolve(strict=True).is_dir():
+                    self.delivery_dir = directory.resolve(strict=True)
+                    self.delivery_actor = configured["id"]
+            except (OSError, RuntimeError, ValueError):
+                pass   # Intentionally disabled when operator configuration is unavailable.
         # Initialize the SQLite file with owner-only access, including on a new installation.
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600)
         os.close(fd)
@@ -99,6 +128,8 @@ class WorkspaceStore:
             """)
             db.execute("INSERT OR IGNORE INTO workspace_state VALUES (1,?)",
                 (json.dumps(dict(players={}, listings={}, trades=[], operations={}, previous_plans=[], commanders={})),))
+        if self.delivery_actor:
+            self.reconcile_delivery()
 
     @contextmanager
     def connect(self, *, write=False):
@@ -199,10 +230,227 @@ class WorkspaceStore:
         with self.connect(write=True) as db:
             db.execute("DELETE FROM workspace_sessions WHERE hash=?", (self.token_hash(token),))
 
+    def _delivery_eligible(self, actor, side):
+        return self.delivery_actor is not None and actor == self.delivery_actor and side == DELIVERY_SIDE
+
+    @staticmethod
+    def _current_delivery(order):
+        # Earlier demo escrow entries are never reclassified as AIM-120D orders.
+        return bool(order and order.get("item") == DELIVERY_ITEM and order.get("protocol") == DELIVERY_VERSION)
+
+    def _delivery_path(self, name):
+        directory = self.delivery_dir
+        if directory is None or not directory.is_dir() or directory.resolve(strict=True) != directory:
+            raise OSError("Simulator delivery directory unavailable")
+        return directory / name
+
+    def _read_delivery_file(self, name, *, max_age=None):
+        path = self._delivery_path(name)
+        if path.is_symlink():
+            raise OSError("Unsafe simulator delivery file")
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            details = os.fstat(handle.fileno())
+            if not stat.S_ISREG(details.st_mode):
+                raise OSError("Unsafe simulator delivery file")
+            if max_age is not None and not 0 <= time.time() - details.st_mtime <= max_age:
+                return None
+            value = handle.read(257)
+        if len(value) > 256:
+            raise OSError("Unexpected simulator delivery file size")
+        return value
+
+    def _delivery_profile_ready(self):
+        try:
+            return self._read_delivery_file(DELIVERY_CAPABILITY, max_age=DELIVERY_CAPABILITY_MAX_AGE) == DELIVERY_CAPABILITY_CONTENT
+        except (OSError, RuntimeError):
+            return False
+
+    def _delivery_lane_empty(self):
+        return all(self._read_delivery_file(name) is None
+                   for name in (DELIVERY_REQUEST, DELIVERY_RECEIPT, DELIVERY_GUARD))
+
+    @staticmethod
+    def _delivery_request(order):
+        return f"BF{DELIVERY_VERSION} {order['order_id']} {DELIVERY_ITEM}\n".encode("ascii")
+
+    @staticmethod
+    def _delivery_guard(order):
+        return f"BF{DELIVERY_VERSION} {order['order_id']} APPLYING\n".encode("ascii")
+
+    def _publish_delivery_request(self, order):
+        target = self._delivery_path(DELIVERY_REQUEST)
+        fd, temporary = tempfile.mkstemp(prefix=".battlefront-delivery-", dir=target.parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(self._delivery_request(order))
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not self._delivery_profile_ready():
+                return False
+            # Publishing a complete inode without replacing an existing request
+            # means a prior operation cannot be lost or silently overwritten.
+            os.link(temporary, target)
+            if hasattr(os, "O_DIRECTORY"):
+                dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            return True
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    @staticmethod
+    def _delivery_view(order):
+        return {"status": order["status"] if order else "idle", "item": DELIVERY_ITEM,
+                "order_id": order["order_id"] if order else None, "airfield": DELIVERY_AIRFIELD}
+
+    def _finish_delivery(self, db, state, order, status, reason, before=None, after=None):
+        if status == "rejected":
+            player = state["players"].get(order["actor"])
+            if not player or player.get("side") != DELIVERY_SIDE:
+                status, reason = "review", "escrow_owner_unavailable"
+            else:
+                inventory = player["inventory"]
+                inventory[DELIVERY_ITEM] = inventory.get(DELIVERY_ITEM, 0) + 1
+        order.update(status=status, reason=reason, before=before, after=after)
+        self._save(db, state)
+        self._record(db, order["actor"], "delivery_" + status, {
+            "order_id": order["order_id"], "item": DELIVERY_ITEM, "reason": reason,
+            "before": before, "after": after, "refunded_units": int(status == "rejected")})
+
+    def reconcile_delivery(self):
+        """Settle a private receipt or publish one never-attempted staged request."""
+        if not self.delivery_actor:
+            return
+        claim = None
+        with self.connect(write=True) as db:
+            state = self._read(db)
+            order = state.get("delivery")
+            if not self._current_delivery(order) or order["actor"] != self.delivery_actor or order["status"] != "pending":
+                return
+            try:
+                request = self._read_delivery_file(DELIVERY_REQUEST)
+                raw = self._read_delivery_file(DELIVERY_RECEIPT)
+                guard = self._read_delivery_file(DELIVERY_GUARD)
+            except (OSError, RuntimeError):
+                # Losing visibility of the lane is not proof that no item was delivered.
+                return
+            expected = self._delivery_request(order)
+            armed_at = order["armed_at"]
+            if armed_at is None:
+                if request is not None or raw is not None or guard is not None:
+                    self._finish_delivery(db, state, order, "review", "lane_occupied")
+                    return
+                if not self._delivery_profile_ready():
+                    self._finish_delivery(db, state, order, "rejected", "recording_profile_unavailable")
+                    return
+                # Commit the intent first. A crash after this point never causes
+                # another publish attempt for the same order.
+                order["armed_at"] = int(time.time())
+                claim = order["order_id"]
+                self._save(db, state)
+            elif request == expected:
+                receipt = RECEIPT.fullmatch(raw or b"")
+                if receipt is None or receipt[1].decode("ascii") != order["order_id"]:
+                    return
+                _, status, lo, hi, code = (part.decode("ascii") for part in receipt.groups())
+                before, after = int(lo), int(hi)
+                armed = guard == self._delivery_guard(order)
+                if status == "APPLYING" and (before, after, code) == (0, -1, "prewrite"):
+                    if not armed:
+                        return     # Guard must precede APPLYING; incomplete visibility cannot confirm a write.
+                    if not order.get("applying_seen"):
+                        order["applying_seen"] = True
+                        self._save(db, state)
+                    return
+                if status == "READY" and armed and (before, after, code) == (0, 1, "verified"):
+                    self._finish_delivery(db, state, order, "ready", code, before, after)
+                elif (status == "REJECTED" and guard is None and not order.get("applying_seen")
+                      and ((code in ("invalid_setup", "stock_unavailable") and before == after == -1)
+                           or (code == "stock_not_zero" and before == after and before > 0))):
+                    self._finish_delivery(db, state, order, "rejected", code, before, after)
+                else:
+                    self._finish_delivery(db, state, order, "review",
+                                          code if status == "REVIEW" else "unverified_receipt", before, after)
+            elif request is not None or int(time.time()) - armed_at >= 30:
+                self._finish_delivery(db, state, order, "review", "publication_uncertain")
+        if claim:
+            with self.connect(write=True) as db:
+                state = self._read(db)
+                order = state.get("delivery")
+                if (not self._current_delivery(order) or order["actor"] != self.delivery_actor
+                        or order["order_id"] != claim or order["status"] != "pending"):
+                    return
+                try:
+                    if self._publish_delivery_request(order) is False:
+                        if self._delivery_lane_empty():
+                            self._finish_delivery(db, state, order, "rejected", "recording_profile_unavailable")
+                        else:
+                            self._finish_delivery(db, state, order, "review", "lane_occupied")
+                except (OSError, RuntimeError):
+                    # The directory entry might already have reached DCS.
+                    # Keep the item in escrow and never retry the write.
+                    self._finish_delivery(db, state, order, "review", "publication_uncertain")
+
+    def _send_to_dcs(self, session, body):
+        actor, side = session["actor"], session["side"]
+        if not self._delivery_eligible(actor, side):
+            raise WorkspaceError("Simulator delivery is not enabled for this account.", 403)
+        if body != {"munition": DELIVERY_ITEM}:
+            raise WorkspaceError(f"Only one {DELIVERY_ITEM} from your companion armory can be sent.", 400)
+        self.reconcile_delivery()
+        with self.connect(write=True) as db:
+            if not db.execute("SELECT 1 FROM workspace_sessions WHERE hash=? AND expires>?",
+                              (session["hash"], int(time.time()))).fetchone():
+                raise WorkspaceError("Sign in to request simulator delivery.", 401)
+            state = self._read(db)
+            player = state["players"].get(actor)
+            if not player or player["side"] != side:
+                raise WorkspaceError("Pilot account unavailable.", 403)
+            if state.get("delivery"):
+                raise WorkspaceError("This recording lane already has an order.", 409)
+            if not self._delivery_profile_ready():
+                raise WorkspaceError("The AIM-120D recording profile is not ready in DCS.", 409)
+            inventory = player["inventory"]
+            if inventory.get(DELIVERY_ITEM, 0) < 1:
+                raise WorkspaceError(f"Requisition one {DELIVERY_ITEM} in the companion armory first.", 409)
+            try:
+                occupied = not self._delivery_lane_empty()
+            except (OSError, RuntimeError):
+                raise WorkspaceError("The simulator recording lane is unavailable.", 503)
+            if occupied:
+                raise WorkspaceError("The simulator recording lane is not empty.", 409)
+            inventory[DELIVERY_ITEM] -= 1
+            if not inventory[DELIVERY_ITEM]:
+                del inventory[DELIVERY_ITEM]
+                player["planned_loadout"].pop(DELIVERY_ITEM, None)
+            order = {"order_id": secrets.token_hex(16), "actor": actor, "item": DELIVERY_ITEM,
+                     "protocol": DELIVERY_VERSION, "status": "pending", "armed_at": None, "created_at": iso_now()}
+            state["delivery"] = order
+            self._save(db, state)
+            self._record(db, actor, "delivery_escrow", {"order_id": order["order_id"],
+                "item": DELIVERY_ITEM, "quantity": 1, "merits_charged": 0})
+        self.reconcile_delivery()
+        delivery = self.get_state(session)["delivery"]
+        message = {"rejected": "Delivery did not start; the item is back in your armory.",
+                   "ready": "Simulator delivery verified; ready to rearm.",
+                   "review": "Delivery outcome needs review; the item remains in escrow."}.get(
+            delivery["status"], "Delivery requested; item is held in escrow until confirmed.")
+        return {"success": True, "delivery": delivery, "message": message}
+
     def get_state(self, session):
+        actor, side = (session["actor"], session["side"]) if session else (None, None)
+        eligible = self._delivery_eligible(actor, side)
+        if eligible:
+            self.reconcile_delivery()
         with self.connect() as db:
             state = self._read(db)
-        actor, side = (session["actor"], session["side"]) if session else (None, None)
         players = {key: (row if key == actor else {k: row[k] for k in ("callsign", "side", "stats")})
                    for key, row in state["players"].items()}
         listings = [row for row in state["listings"].values() if row["side"] == side]
@@ -210,11 +458,18 @@ class WorkspaceStore:
         for row in listings:
             row["seller_callsign"] = players[row["seller"]]["callsign"]
         trades = [row for row in state["trades"] if row["side"] == side]
-        return {"workspace": {"mode": "production", "player_id": actor, "authenticated": actor is not None,
+        result = {"workspace": {"mode": "production", "player_id": actor, "authenticated": actor is not None,
                               "csrf": session["csrf"] if session else None,
                               "can_command": session["can_command"] if session else False},
                 "currency_name": "Companion Merits", "currency_symbol": "CM", "munition_catalog": self.catalog,
                 "players": players, "marketplace": listings, "trade_history": trades}
+        if eligible:
+            order = state.get("delivery")
+            # Old versions and other pilots' receipts stay private and untouched.
+            if ((not order and self._delivery_profile_ready())
+                    or (self._current_delivery(order) and order["actor"] == actor)):
+                result["delivery"] = self._delivery_view(order)
+        return result
 
     def get_campaign(self, session, sectors, projection):
         with self.connect() as db:
@@ -232,6 +487,8 @@ class WorkspaceStore:
         }
 
     def mutate(self, path, session, body, sectors):
+        if path == "/api/dcs/deliver":
+            return self._send_to_dcs(session, body)
         actor, side = session["actor"], session["side"]
         if "side" in body and (type(body["side"]) is not int or body["side"] != side):
             raise WorkspaceError("This operation is only available to your assigned coalition.", 403)

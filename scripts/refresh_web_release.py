@@ -24,10 +24,12 @@ TAG = "web-production"
 ARCHIVE = "battlefront-web.tar.gz"
 CHECKSUM = "battlefront-web.sha256"
 SERVICE = "bf-classroom-preview.service"
-FILES = (
+REQUIRED_FILES = (
     "web/index.html", "web/server.py", "web/tacview.js", "web/dist/companion.js",
     "web/dist/tailwind.css", "server/telemetry_engine.py", "server/persistence/workspace_store.py",
 )
+CATALOG_FILE = "server/demo_catalog.json"
+FILES = REQUIRED_FILES + (CATALOG_FILE,)
 ASSET_HOSTS = frozenset({"release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"})
 MAX_ARCHIVE = 8 * 1024 * 1024
 MAX_FILE = 4 * 1024 * 1024
@@ -37,6 +39,12 @@ HASH_RE = re.compile(r"[a-f0-9]{64}")
 
 def sha256(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def release_shape(paths):
+    # An upgraded origin can still apply a legacy release or finish an interrupted
+    # rollback from before the catalog was part of the versioned runtime.
+    return set(REQUIRED_FILES) <= set(paths) <= set(FILES)
 
 
 def asset_url(repo, file):
@@ -109,8 +117,12 @@ def checked_archive(raw, expected):
                 raise ValueError("Truncated release member")
             if name.endswith(".py"):
                 compile(item, name, "exec")
+            elif name == CATALOG_FILE:
+                catalog = json.loads(item.decode("utf-8"))
+                if not isinstance(catalog, dict) or any(not isinstance(row, dict) for row in catalog.values()):
+                    raise ValueError("Invalid release catalog")
             data[name] = item
-    if set(data) != set(FILES):
+    if not release_shape(data):
         raise ValueError("Release archive is missing one or more required files")
     return data
 
@@ -181,9 +193,10 @@ def install_backup(root, state):
 def restore(root, state, ready):
     with zipfile.ZipFile(state / "previous-web.zip") as backup:
         manifest = json.loads(backup.read("manifest.json"))
-        if set(manifest) != set(FILES) or set(backup.namelist()) != {"manifest.json", *(p for p in FILES if manifest[p] is not None)}:
+        if (not isinstance(manifest, dict) or not release_shape(manifest)
+                or set(backup.namelist()) != {"manifest.json", *(p for p in manifest if manifest[p] is not None)}):
             raise ValueError("Rollback backup is incomplete")
-        for name in FILES:
+        for name in manifest:
             path = location(root, name)
             mode = manifest[name]
             if mode is None:
@@ -199,7 +212,7 @@ def restore(root, state, ready):
 
 
 def apply_release(root, state, data, digest, ready):
-    if set(data) != set(FILES):
+    if not release_shape(data):
         raise ValueError("Incomplete release; nothing changed")
     with tempfile.TemporaryDirectory(prefix="staged-", dir=state) as directory:
         stage = Path(directory)
@@ -211,13 +224,14 @@ def apply_release(root, state, data, digest, ready):
         atomic(state / "pending", (digest + "\n").encode("ascii"))
         try:
             for name in FILES:
-                atomic(location(root, name), runtime_bytes(stage / name), 0o644)
+                if name in data:
+                    atomic(location(root, name), runtime_bytes(stage / name), 0o644)
             ready()
         except BaseException:
             restore(root, state, ready)
             print("Restored and restarted the previous web release", file=sys.stderr, flush=True)
             raise
-        marker = {"digest": digest, "files": {name: sha256(data[name]) for name in FILES}}
+        marker = {"digest": digest, "files": {name: sha256(payload) for name, payload in data.items()}}
         atomic(state / "installed.json", json.dumps(marker, sort_keys=True).encode())
         (state / "pending").unlink()
         sync_directory(state)
@@ -226,9 +240,10 @@ def apply_release(root, state, data, digest, ready):
 def installed(root, state, digest):
     try:
         marker = json.loads((state / "installed.json").read_text())
-        if marker["digest"] != digest or set(marker["files"]) != set(FILES):
+        files = marker["files"]
+        if marker["digest"] != digest or not isinstance(files, dict) or not release_shape(files):
             return False
-        return all(sha256(runtime_bytes(location(root, path))) == marker["files"][path] for path in FILES)
+        return all(sha256(runtime_bytes(location(root, path))) == expected for path, expected in files.items())
     except (OSError, KeyError, TypeError, ValueError):
         return False
 

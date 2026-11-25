@@ -40,6 +40,8 @@ jobs:
           python scripts/build_dcs_engine.py
           luac5.1 -p build/battlefront.lua
           luac5.1 -p server/BattlefrontTelemetry.lua
+          luac5.1 -p server/BattlefrontDelivery.lua
+          lua5.1 scripts/verify_battlefront_delivery.lua
           { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,aircraft,economy,ai_director}.lua scripts/verify_director_progression.lua; } | lua5.1 -
           { printf '%s\n' 'Battlefront={SIDE_RED=1,SIDE_BLUE=2}; country={id={USA=2,RUSSIA=0}}; Group={Category={AIRPLANE=0,HELICOPTER=1}}'; cat mission/core/{config,state}.lua mission/systems/{research,ai_director}.lua scripts/verify_aircap.lua; } | lua5.1 -
       - name: Test durable workspace and deployment edge
@@ -70,7 +72,7 @@ jobs:
           tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 \
             -czf battlefront-web.tar.gz \
             web/index.html web/server.py web/tacview.js web/dist/companion.js web/dist/tailwind.css \
-            server/telemetry_engine.py server/persistence/workspace_store.py
+            server/telemetry_engine.py server/persistence/workspace_store.py server/demo_catalog.json
           sha256sum battlefront-web.tar.gz > battlefront-web.sha256
       - name: Publish to the origin's verified release channel
         env:

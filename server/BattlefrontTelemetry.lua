@@ -95,6 +95,9 @@ function callbacks.onSimulationFrame()
     local mission = tostring(DCS.getMissionFilename() or ""):gsub("\\","/"):match("([^/]+)$") or ""
     local name = mission:lower():gsub("%.miz$","")
     local campaign = name == 'battlefront_caucasus' or tostring(DCS.getMissionName() or ""):lower() == 'battlefront_caucasus'
+    local recording = name == 'caucasus_delivery_demo'
+    local missionField = recording and ',"mission":"Battlefront Delivery Demo"'
+        or (campaign and ',"mission":"Battlefront Caucasus"' or '')
     local result, ok = net.dostring_in("scripting", query)
     if not ok or not result or result == '' then
         if not reportedError and DCS.getModelTime() > 3 then
@@ -108,7 +111,7 @@ function callbacks.onSimulationFrame()
     local f = io.open(pending, 'wb')
     if not f then return end
     f:write(string.format('{"version":1,"session":%d,"seq":%d,%s%s}', epoch, sequence, result,
-        campaign and ',"mission":"Battlefront Caucasus"' or ''))
+        missionField))
     f:close()
     -- Windows/Wine rename cannot replace an existing file. Alternate slots so
     -- the reader always has one complete previous frame during replacement.

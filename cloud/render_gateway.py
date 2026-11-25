@@ -15,7 +15,7 @@ READ = {'/api/state','/api/campaign','/api/upgrades','/api/telemetry'}
 WRITE = {'/api/workspace/login','/api/workspace/logout','/api/player/set_callsign','/api/requisition',
          '/api/marketplace/list','/api/marketplace/buy','/api/marketplace/cancel','/api/armory/mount',
          '/api/operations/join','/api/operations/leave','/api/operations/propose',
-         '/api/operations/command','/api/operations/launch'}
+         '/api/operations/command','/api/operations/launch','/api/dcs/deliver'}
 STATIC = {'/','/index.html','/sectors.json','/tacview.js','/caucasus_terrain.js','/airframes.js',
           '/dist/companion.js','/dist/tailwind.css','/terrain/caucasus-height.png','/terrain/caucasus-relief.jpg',
           '/vendor/three.min.js','/vendor/OrbitControls.js','/vendor/GLTFLoader.js',
